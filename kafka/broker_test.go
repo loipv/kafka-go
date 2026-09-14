@@ -400,7 +400,12 @@ func TestCommitResumeWithoutRebalanceCallback(t *testing.T) {
 	gotA := make(chan *Message, 8)
 	a.OnMessage(func(_ context.Context, m *Message) error { gotA <- m; return nil })
 	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
 	go a.Start(ctxA)
+	// Registered right after Start so a failed assertion below still tears A
+	// down. The explicit mid-test Close below wins the CAS; this deferred one
+	// is a no-op by then.
+	defer a.Close(context.Background())
 	first := recvMessages(t, gotA, 5, 15*time.Second)
 	if err := a.Commit(first...); err != nil {
 		t.Fatalf("Commit: %v", err)
@@ -648,6 +653,7 @@ func TestBlockedPartition_NoOffsetDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw producer: %v", err)
 	}
+	defer raw.Close()
 	produce := func(part int32, n int) {
 		for i := 0; i < n; i++ {
 			_ = raw.Produce(&ckafka.Message{
