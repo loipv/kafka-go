@@ -99,9 +99,9 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 					t.Errorf("delay[%d] = %v, want %v", i, delays[i], tt.wantDelays[i])
 				}
 			}
-			wantCalls := tt.failures + 1 // hoisted: the brief scoped it inside the (empty) guard if
-			if tt.wantErr || calls != wantCalls {
-				// wantErr cases run all attempts
+			wantCalls := tt.failures + 1
+			if calls != wantCalls {
+				t.Errorf("handler calls = %d, want %d", calls, wantCalls)
 			}
 			if !tt.wantErr && attempts != wantCalls {
 				t.Errorf("attempts = %d, want %d", attempts, wantCalls)

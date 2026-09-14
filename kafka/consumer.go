@@ -763,6 +763,13 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 	}
 	if retryCount >= config.MaxRetries {
 		c.logger.Warn("dlq max retries exceeded — sending to final dlq")
+		// Space cycles by one Delay: a persistently failing final-DLQ produce
+		// must not re-read and re-attempt with zero backoff.
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.after(config.Delay):
+		}
 		if config.FinalDLQTopic != "" {
 			if err := c.sendToFinalDLQ(ctx, msg, config.FinalDLQTopic); err != nil {
 				c.logger.Error("final dlq produce failed: %v", err)
@@ -791,7 +798,21 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 	if err := c.invokeHandler(ctx, msg); err != nil { // #1: was c.messageHandler — nil panic
 		c.metrics.IncrementReprocessFailures()
 		c.logger.Warn("dlq reprocess failed — will be redelivered: %v", err)
-		return // NOT committed — the claim the old comment made, now true (#10)
+		// The count must travel on the message: re-produce it (headers now
+		// carry count+1 and a fresh timestamp) back to the DLQ topic it was
+		// read from, and only then commit the original. Without the
+		// re-produce, redelivery restarts from the broker copy at count=0 and
+		// the message never graduates to the final DLQ. If the re-produce
+		// fails, do NOT commit — the original stays for the next cycle
+		// (at-least-once preserved).
+		if rpErr := c.dlqService.produceToTopic(ctx, msg.Topic, msg); rpErr != nil {
+			c.logger.Error("dlq re-produce failed — original left in place: %v", rpErr)
+			return
+		}
+		if err := commit(); err != nil {
+			c.logger.Warn("dlq retry commit failed: %v", err)
+		}
+		return
 	}
 	c.metrics.IncrementReprocessSuccesses()
 	if err := commit(); err != nil {
