@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,7 @@ type Consumer struct {
 	consumer *ckafka.Consumer
 	config   *ConsumerConfig
 	tracer   *TracingService
-	logger   Logger
+	logger   *slog.Logger
 
 	// Handlers
 	messageHandler      MessageHandler
@@ -51,9 +52,8 @@ type Consumer struct {
 	// backoff cycles instantaneous. Defaults to time.After.
 	after func(time.Duration) <-chan time.Time
 
-	// Circuit breaker for DLQ
+	// Circuit breaker for DLQ (written once in NewConsumer, read-only after)
 	circuitBreakers map[string]*CircuitBreaker
-	cbMu            sync.RWMutex
 
 	// Blocked partitions (at-least-once): partitions paused pending an
 	// escalating retry deadline because their message is unparkable.
@@ -69,15 +69,15 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	}
 
 	if len(config.Brokers) == 0 {
-		return nil, fmt.Errorf("brokers are required")
+		return nil, ErrBrokersRequired
 	}
 
 	if config.GroupID == "" {
-		return nil, fmt.Errorf("group ID is required")
+		return nil, ErrGroupIDRequired
 	}
 
 	if len(config.Topics) == 0 {
-		return nil, fmt.Errorf("at least one topic is required")
+		return nil, ErrTopicsRequired
 	}
 
 	// Build kafka config map (connection/auth via the connConfig seam)
@@ -94,7 +94,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	// Initialize logger
 	logger := config.Logger
 	if logger == nil {
-		logger = NewDefaultLogger(config.LogLevel)
+		logger = slog.Default() // silence with slog.New(slog.DiscardHandler)
 	}
 
 	kc := &Consumer{
@@ -155,11 +155,11 @@ func (c *Consumer) OnGroupedBatch(handler GroupedBatchHandler) {
 // Start starts consuming messages (blocking)
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
-		return fmt.Errorf("no handler registered; call OnMessage/OnBatch/OnGroupedBatch before Start") // #17
+		return ErrNoHandler // #17
 	}
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
-		return fmt.Errorf("consumer is already running")
+		return ErrConsumerRunning
 	}
 	// Publish this run's exit signal only after winning the CAS: a failed
 	// Start must never replace the channel the already-running loop closes,
@@ -207,7 +207,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 					continue
 				}
 				// Log other errors but continue
-				c.logger.Warn("Error reading message: %v", err)
+				c.logger.Warn("read message failed", "error", err)
 				continue
 			}
 
@@ -316,8 +316,6 @@ func (c *Consumer) DLQMetrics() *DLQMetrics {
 
 // CircuitState returns circuit breaker state
 func (c *Consumer) CircuitState(dlqTopic string) CircuitState {
-	c.cbMu.RLock()
-	defer c.cbMu.RUnlock()
 	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
 		return cb.State()
 	}
@@ -326,8 +324,6 @@ func (c *Consumer) CircuitState(dlqTopic string) CircuitState {
 
 // ResetCircuit resets the circuit breaker
 func (c *Consumer) ResetCircuit(dlqTopic string) {
-	c.cbMu.Lock()
-	defer c.cbMu.Unlock()
 	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
 		cb.Reset()
 	}
@@ -344,6 +340,11 @@ func (c *Consumer) convertMessage(msg *ckafka.Message) *Message {
 		}
 	}
 
+	topic := ""
+	if msg.TopicPartition.Topic != nil {
+		topic = *msg.TopicPartition.Topic
+	}
+
 	return &Message{
 		Key:       msg.Key,
 		Value:     msg.Value,
@@ -351,7 +352,7 @@ func (c *Consumer) convertMessage(msg *ckafka.Message) *Message {
 		Partition: msg.TopicPartition.Partition,
 		Offset:    int64(msg.TopicPartition.Offset),
 		Timestamp: msg.Timestamp,
-		Topic:     *msg.TopicPartition.Topic,
+		Topic:     topic,
 	}
 }
 
@@ -365,7 +366,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	if c.idempotencyStore != nil && c.config.IdempotencyKey != nil {
 		idempotencyKey = c.config.IdempotencyKey(msg)
 		if idempotencyKey != "" && c.idempotencyStore.IsDuplicate(idempotencyKey) {
-			c.logger.Debug("Skipping duplicate message with key: %s", idempotencyKey)
+			c.logger.Debug("skipping duplicate message", "key", idempotencyKey)
 			return outcomeParked
 		}
 	}
@@ -468,7 +469,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 		c.metrics.IncrementHandlerRetries(msg.Topic)
 
 		if attempt < maxRetries {
-			c.logger.Debug("Retrying message (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
 			select {
 			case <-ctx.Done():
 				return ctx.Err(), attempt + 1
@@ -482,7 +483,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 	}
 
 	if skipOnMaxRetries {
-		c.logger.Warn("Max retries exceeded — skipping message: %v", lastErr)
+		c.logger.Warn("max retries exceeded — skipping message", "error", lastErr)
 		return fmt.Errorf("%w: %v", ErrSkippedOnMaxRetries, lastErr), maxRetries + 1
 	}
 	return lastErr, maxRetries + 1
@@ -498,16 +499,14 @@ func (c *Consumer) handleError(ctx context.Context, err error, msg *Message, att
 		}
 	}
 	if c.dlqService != nil {
-		c.cbMu.RLock()
 		cb := c.circuitBreakers[c.config.DLQ.Topic]
-		c.cbMu.RUnlock()
 
 		if cb != nil && cb.IsOpen() {
-			c.logger.Warn("circuit breaker open — message unparkable (topic=%s): %v", msg.Topic, err)
+			c.logger.Warn("circuit breaker open — message unparkable", "topic", msg.Topic, "error", err)
 			return outcomeBlocked
 		}
 		if dlqErr := c.dlqService.produceToDLQ(ctx, msg, err, attempts); dlqErr != nil {
-			c.logger.Error("dlq produce failed: %v", dlqErr)
+			c.logger.Error("dlq produce failed", "error", dlqErr)
 			if cb != nil {
 				cb.RecordFailure()
 			}
@@ -576,7 +575,7 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 		endSpan(processingErr)
 	}
 
-	// OnMessage batch error
+	// Batch handler error
 	if processingErr != nil {
 		blocked = c.handleBatchError(ctx, processingErr, batch) || blocked
 	}
@@ -598,28 +597,18 @@ func (c *Consumer) storeOffsets(msgs []*Message) {
 		return
 	}
 	if _, err := c.consumer.StoreOffsets(commitOffsets(msgs)); err != nil {
-		c.logger.Warn("store offsets failed: %v", err)
+		c.logger.Warn("store offsets failed", "error", err)
 	}
 }
 
-// groupByKey groups messages by key
-// Optimized with pre-allocation based on estimated group count
+// groupByKey groups messages by key, preserving first-seen order.
 func (c *Consumer) groupByKey(msgs []*Message) []GroupedBatch {
 	if len(msgs) == 0 {
 		return nil
 	}
 
-	// Estimate number of unique keys (assume ~10 messages per key on average)
-	estimatedGroups := len(msgs) / 10
-	if estimatedGroups < 1 {
-		estimatedGroups = 1
-	}
-	if estimatedGroups > len(msgs) {
-		estimatedGroups = len(msgs)
-	}
-
-	groups := make(map[string][]*Message, estimatedGroups)
-	order := make([]string, 0, estimatedGroups)
+	groups := make(map[string][]*Message, len(msgs))
+	order := make([]string, 0, len(msgs))
 
 	for _, msg := range msgs {
 		key := string(msg.Key)
@@ -715,19 +704,19 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 
 	dlqConsumer, err := ckafka.NewConsumer(&cm)
 	if err != nil {
-		c.logger.Error("Failed to create DLQ retry consumer: %v", err)
+		c.logger.Error("failed to create dlq retry consumer", "error", err)
 		return
 	}
 	defer dlqConsumer.Close()
 
 	if err := dlqConsumer.Subscribe(dlqTopic, nil); err != nil {
-		c.logger.Error("Failed to subscribe to DLQ topic: %v", err)
+		c.logger.Error("failed to subscribe to dlq topic", "error", err)
 		return
 	}
 
 	commit := func() error { _, err := dlqConsumer.Commit(); return err }
 
-	c.logger.Info("DLQ retry consumer started for topic: %s", dlqTopic)
+	c.logger.Info("dlq retry consumer started", "topic", dlqTopic)
 
 	for {
 		select {
@@ -739,7 +728,7 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 				if kafkaErr, ok := err.(ckafka.Error); ok && kafkaErr.Code() == ckafka.ErrTimedOut {
 					continue
 				}
-				c.logger.Warn("DLQ consumer error: %v", err)
+				c.logger.Warn("dlq consumer error", "error", err)
 				continue
 			}
 
@@ -762,7 +751,7 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 		retryCount, _ = strconv.Atoi(string(countBytes))
 	}
 	if retryCount >= config.MaxRetries {
-		c.logger.Warn("dlq max retries exceeded — sending to final dlq")
+		c.logger.Warn("dlq max retries exceeded — sending to final dlq", "topic", msg.Topic, "offset", msg.Offset)
 		// Space cycles by one Delay: a persistently failing final-DLQ produce
 		// must not re-read and re-attempt with zero backoff.
 		select {
@@ -772,12 +761,12 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 		}
 		if config.FinalDLQTopic != "" {
 			if err := c.sendToFinalDLQ(ctx, msg, config.FinalDLQTopic); err != nil {
-				c.logger.Error("final dlq produce failed: %v", err)
+				c.logger.Error("final dlq produce failed", "error", err)
 				return // not committed — genuinely re-picked-up
 			}
 		}
 		if err := commit(); err != nil {
-			c.logger.Warn("dlq retry commit failed: %v", err)
+			c.logger.Warn("dlq retry commit failed", "error", err)
 		}
 		return
 	}
@@ -797,7 +786,7 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 
 	if err := c.invokeHandler(ctx, msg); err != nil { // #1: was c.messageHandler — nil panic
 		c.metrics.IncrementReprocessFailures()
-		c.logger.Warn("dlq reprocess failed — will be redelivered: %v", err)
+		c.logger.Warn("dlq reprocess failed — will be redelivered", "error", err)
 		// The count must travel on the message: re-produce it (headers now
 		// carry count+1 and a fresh timestamp) back to the DLQ topic it was
 		// read from, and only then commit the original. Without the
@@ -806,17 +795,17 @@ func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DL
 		// fails, do NOT commit — the original stays for the next cycle
 		// (at-least-once preserved).
 		if rpErr := c.dlqService.produceToTopic(ctx, msg.Topic, msg); rpErr != nil {
-			c.logger.Error("dlq re-produce failed — original left in place: %v", rpErr)
+			c.logger.Error("dlq re-produce failed — original left in place", "error", rpErr)
 			return
 		}
 		if err := commit(); err != nil {
-			c.logger.Warn("dlq retry commit failed: %v", err)
+			c.logger.Warn("dlq retry commit failed", "error", err)
 		}
 		return
 	}
 	c.metrics.IncrementReprocessSuccesses()
 	if err := commit(); err != nil {
-		c.logger.Warn("dlq retry commit failed: %v", err)
+		c.logger.Warn("dlq retry commit failed", "error", err)
 	}
 }
 
@@ -840,13 +829,13 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 		cooperative := consumer.GetRebalanceProtocol() == "COOPERATIVE"
 		switch e := event.(type) {
 		case ckafka.AssignedPartitions:
-			c.logger.Info("Partitions assigned: %d", len(e.Partitions))
+			c.logger.Info("partitions assigned", "count", len(e.Partitions))
 			atomic.StoreInt32(&c.pauseApplied, 0) // rebalance resets librdkafka pause state
 
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
 				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "assigned", Partitions: convertPartitions(e.Partitions)}); err != nil {
-					c.logger.Error("Rebalance callback error on assign: %v", err)
+					c.logger.Error("rebalance callback error on assign", "error", err)
 					return err
 				}
 			}
@@ -857,12 +846,12 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 			return consumer.Assign(e.Partitions)
 
 		case ckafka.RevokedPartitions:
-			c.logger.Info("Partitions revoked: %d", len(e.Partitions))
+			c.logger.Info("partitions revoked", "count", len(e.Partitions))
 
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
 				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "revoked", Partitions: convertPartitions(e.Partitions)}); err != nil {
-					c.logger.Error("Rebalance callback error on revoke: %v", err)
+					c.logger.Error("rebalance callback error on revoke", "error", err)
 					return err
 				}
 			}
@@ -872,7 +861,7 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 				if _, err := consumer.Commit(); err != nil {
 					// Ignore "no offset stored" errors
 					if ke, ok := err.(ckafka.Error); !ok || ke.Code() != ckafka.ErrNoOffset {
-						c.logger.Warn("Failed to commit offsets during rebalance: %v", err)
+						c.logger.Warn("failed to commit offsets during rebalance", "error", err)
 					}
 				}
 			}
@@ -897,11 +886,6 @@ const (
 	outcomeParked  outcome = iota // offset may be stored — message is durably dealt with
 	outcomeBlocked                // unparkable — partition must block and retry
 )
-
-// ErrSkippedOnMaxRetries wraps the handler error when SkipOnMaxRetries gave up
-// on a message; processMessage parks (advances past) such messages after a
-// best-effort DLQ produce and ErrorHandler notify.
-var ErrSkippedOnMaxRetries = errors.New("message skipped after max retries")
 
 // Commit stores and commits offsets for the given messages. With no
 // arguments it commits everything stored so far. Offsets are committed at
@@ -960,13 +944,14 @@ func (c *Consumer) blockMessages(ctx context.Context, msgs []*Message) {
 		c.blocked[tp] = bs
 		topic := tp.Topic
 		paused = append(paused, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(bs.offset)})
-		c.logger.Warn("partition blocked — message unparkable (topic=%s partition=%d offset=%d blocks=%d retryIn=%v)",
-			tp.Topic, tp.Partition, bs.offset, bs.blocks, blockBackoff(bs.blocks, c.config.Retry))
+		c.logger.Warn("partition blocked — message unparkable",
+			"topic", tp.Topic, "partition", tp.Partition, "offset", bs.offset,
+			"blocks", bs.blocks, "retryIn", blockBackoff(bs.blocks, c.config.Retry))
 	}
 	c.blockMu.Unlock()
 	c.metrics.SetBlocked(c.blockedSnapshot())
 	if err := c.consumer.Pause(paused); err != nil {
-		c.logger.Error("pause failed for blocked partition (next pass re-attempts): %v", err)
+		c.logger.Error("pause failed for blocked partition (next pass re-attempts)", "error", err)
 	}
 	for _, tp := range paused {
 		if err := c.consumer.Seek(tp, 5000); err != nil {
@@ -974,8 +959,8 @@ func (c *Consumer) blockMessages(ctx context.Context, msgs []*Message) {
 			if tp.Topic != nil {
 				t = *tp.Topic
 			}
-			c.logger.Error("seek failed for blocked partition (topic=%s partition=%d offset=%d): %v",
-				t, tp.Partition, tp.Offset, err)
+			c.logger.Error("seek failed for blocked partition",
+				"topic", t, "partition", tp.Partition, "offset", tp.Offset, "error", err)
 		}
 	}
 }
@@ -1004,7 +989,7 @@ func (c *Consumer) resumeBlocked() {
 	c.blockMu.Unlock()
 	if len(toResume) > 0 {
 		if err := c.consumer.Resume(toResume); err != nil {
-			c.logger.Error("resume failed for blocked partition (next pass re-attempts): %v", err)
+			c.logger.Error("resume failed for blocked partition (next pass re-attempts)", "error", err)
 			// Roll the resumed flag back so the next pass really does
 			// re-attempt: leaving it set would park the partition until a
 			// rebalance drops the blocked state.

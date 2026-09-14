@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"strconv"
 	"sync"
@@ -17,24 +18,21 @@ type DLQService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *DLQMetricsCollector
-	logger   Logger
+	logger   *slog.Logger
 	closed   int32 // atomic: 0=open, 1=closed
 	after    func(time.Duration) <-chan time.Time
 }
 
 // newDLQService creates a new DLQ service. It builds its producer from the
-// same connConfig as the parent consumer, so SSL/SASL is never dropped.
-func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector, logger Logger) (*DLQService, error) {
+// same connConfig as the parent consumer, so SSL/SASL is never dropped. The
+// logger comes from the parent consumer (already defaulted, never nil).
+func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector, logger *slog.Logger) (*DLQService, error) {
 	cm := cc.configMap()
 	cm["acks"] = -1 // All replicas
 
 	producer, err := ckafka.NewProducer(&cm)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DLQ producer: %w", err)
-	}
-
-	if logger == nil {
-		logger = NewDefaultLogger(LogLevelInfo)
 	}
 
 	return &DLQService{
@@ -51,13 +49,13 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 // confirmed by a delivery report and retried per DLQConfig before giving up.
 func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
-		return fmt.Errorf("dlq service is closed")
+		return ErrDLQClosed
 	}
 	out := *msg
 	out.Headers = maps.Clone(msg.Headers) // nil-safe
 
 	out.SetHeader("x-dlq-original-topic", []byte(msg.Topic))
-	out.SetHeader("x-dlq-timestamp", time.Now().AppendFormat(nil, time.RFC3339))
+	out.SetHeader("x-dlq-timestamp", appendTime(nil, time.Now()))
 	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // #9: the real count
 	if s.config.IncludeErrorInfo && err != nil {
 		out.SetHeader("x-dlq-error-message", []byte(err.Error()))
@@ -89,10 +87,10 @@ func (s *DLQService) produceWithRetry(ctx context.Context, topic string, msg *Me
 	}
 }
 
-// SendToTopic sends a message to a specific topic
+// produceToTopic sends a message to a specific topic
 func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Message) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
-		return fmt.Errorf("DLQ service is closed")
+		return ErrDLQClosed
 	}
 
 	kafkaMsg := &ckafka.Message{

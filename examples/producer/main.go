@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,7 +30,7 @@ func main() {
 		kafka.ProducerWithAcks(kafka.AcksAll),
 		kafka.ProducerWithCompression(kafka.CompressionGZIP),
 		kafka.ProducerWithIdempotent(true),
-		kafka.WithLogLevel(kafka.LogLevelInfo),
+		kafka.ProducerWithLogger(slog.Default()),
 		kafka.ProducerWithTracing(&kafka.TracingConfig{
 			Enabled:    true,
 			TracerName: "order-producer",

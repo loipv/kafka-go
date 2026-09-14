@@ -111,22 +111,6 @@ const (
 	CircuitHalfOpen CircuitState = "HALF_OPEN"
 )
 
-// LogLevel represents logging level
-type LogLevel int
-
-const (
-	// LogLevelNone - No logging
-	LogLevelNone LogLevel = 0
-	// LogLevelError - Error level
-	LogLevelError LogLevel = 1
-	// LogLevelWarn - Warning level
-	LogLevelWarn LogLevel = 2
-	// LogLevelInfo - Info level
-	LogLevelInfo LogLevel = 3
-	// LogLevelDebug - Debug level
-	LogLevelDebug LogLevel = 4
-)
-
 // Handler types
 
 // MessageHandler handles a single message

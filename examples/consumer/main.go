@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -79,7 +80,7 @@ func main() {
 		}),
 
 		// Logging
-		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
+		kafka.ConsumerWithLogger(slog.Default()),
 
 		// Error handler — returning nil claims ownership (the message is
 		// parked and its offset advances); returning the error defers to the

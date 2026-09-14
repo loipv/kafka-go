@@ -99,11 +99,9 @@ func TestAllBuildersPropagateAuth(t *testing.T) {
 			if err != nil {
 				t.Fatalf("builder %q: %v", b.name, err)
 			}
-			v, err := cm.Get("security.protocol", nil)
-			if err != nil {
-				t.Fatalf("builder %q dropped auth config: %v", b.name, err)
-			}
-			if v != "sasl_ssl" {
+			// ConfigMap.Get returns (nil, nil) for a missing key — a dropped
+			// auth key surfaces as a nil value, not an error.
+			if v, _ := cm.Get("security.protocol", nil); v != "sasl_ssl" {
 				t.Errorf("builder %q security.protocol = %v, want sasl_ssl", b.name, v)
 			}
 		})
@@ -210,12 +208,6 @@ func TestBuildProducerConfig(t *testing.T) {
 			if err != nil || v != w {
 				t.Errorf("key %q = %v (%v), want %v", k, v, err, w)
 			}
-		}
-	})
-	t.Run("log_level is never forwarded", func(t *testing.T) {
-		cm := buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"}, LogLevel: LogLevelDebug})
-		if v, _ := cm.Get("log_level", nil); v != nil {
-			t.Errorf("log_level must not be forwarded to librdkafka (its 0-4 enum mismatches syslog 0-7), got %v", v)
 		}
 	})
 }

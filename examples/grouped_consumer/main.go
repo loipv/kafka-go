@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,7 +39,7 @@ func main() {
 		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
 		// Logging
-		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
+		kafka.ConsumerWithLogger(slog.Default()),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create consumer: %v", err)

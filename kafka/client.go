@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +17,7 @@ type Producer struct {
 	producer *ckafka.Producer
 	config   *ProducerConfig
 	tracer   *TracingService
-	logger   Logger
+	logger   *slog.Logger
 	closed   int32 // atomic: 0=open, 1=closed
 
 	done        chan struct{}
@@ -32,7 +33,7 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	}
 
 	if len(config.Brokers) == 0 {
-		return nil, fmt.Errorf("brokers are required")
+		return nil, ErrBrokersRequired
 	}
 
 	// Build kafka config map (connection/auth via the connConfig seam)
@@ -46,7 +47,7 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	// Initialize logger
 	logger := config.Logger
 	if logger == nil {
-		logger = NewDefaultLogger(config.LogLevel)
+		logger = slog.Default() // silence with slog.New(slog.DiscardHandler)
 	}
 
 	client := &Producer{
@@ -119,7 +120,7 @@ func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Messag
 
 func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
 	if atomic.LoadInt32(&p.closed) == 1 {
-		err := fmt.Errorf("producer is closed")
+		err := ErrProducerClosed
 		for _, m := range msgs {
 			endSpan(m, err) // spans were started in prepareMessage before this check
 		}
@@ -180,7 +181,7 @@ func topicOf(m *ckafka.Message) string {
 // the DeliveryErrorHandler.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 	if atomic.LoadInt32(&p.closed) == 1 {
-		return fmt.Errorf("producer is closed")
+		return ErrProducerClosed
 	}
 	return p.producer.Produce(p.buildKafkaMessage(topic, msg), nil)
 }
@@ -259,7 +260,7 @@ func (p *Producer) handleDeliveryReports() {
 					endSpan(ev, nil)
 				}
 			case ckafka.Error:
-				p.logger.Error("Kafka error: %v", ev) // slog form lands in Task 11
+				p.logger.Error("kafka error", "error", ev)
 			}
 		}
 	}
@@ -268,9 +269,17 @@ func (p *Producer) handleDeliveryReports() {
 // reportDeliveryError routes an async delivery failure to the configured
 // DeliveryErrorHandler, or logs it when none is set.
 func (p *Producer) reportDeliveryError(ev *ckafka.Message, err error) {
+	var headers Headers
+	if len(ev.Headers) > 0 {
+		headers = make(Headers, len(ev.Headers))
+		for _, h := range ev.Headers {
+			headers[h.Key] = h.Value
+		}
+	}
 	msg := &Message{
 		Key:       ev.Key,
 		Value:     ev.Value,
+		Headers:   headers,
 		Partition: ev.TopicPartition.Partition,
 		Offset:    int64(ev.TopicPartition.Offset),
 		Topic:     topicOf(ev),
@@ -279,7 +288,7 @@ func (p *Producer) reportDeliveryError(ev *ckafka.Message, err error) {
 		p.deliveryErr(msg, err)
 		return
 	}
-	p.logger.Error("Async delivery failed for topic %s: %v", msg.Topic, err) // slog form lands in Task 11
+	p.logger.Error("async delivery failed", "topic", msg.Topic, "error", err)
 }
 
 // Helper functions

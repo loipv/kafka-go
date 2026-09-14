@@ -15,7 +15,6 @@ import (
 type HealthChecker struct {
 	producer     *ckafka.Producer
 	admin        *ckafka.AdminClient
-	brokers      []string
 	timeout      time.Duration
 	ownsProducer bool
 }
@@ -27,7 +26,7 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 		opt(cfg)
 	}
 	if len(cfg.Brokers) == 0 {
-		return nil, fmt.Errorf("brokers are required")
+		return nil, ErrBrokersRequired
 	}
 	cfgMap := buildProducerConfig(cfg)
 	p, err := ckafka.NewProducer(&cfgMap)
@@ -42,7 +41,6 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	return &HealthChecker{
 		producer:     p,
 		admin:        admin,
-		brokers:      cfg.Brokers,
 		timeout:      10 * time.Second,
 		ownsProducer: true,
 	}, nil
@@ -58,7 +56,6 @@ func NewHealthCheckerFromProducer(p *Producer) (*HealthChecker, error) {
 	return &HealthChecker{
 		producer:     p.producer,
 		admin:        admin,
-		brokers:      p.config.Brokers,
 		timeout:      10 * time.Second,
 		ownsProducer: false,
 	}, nil

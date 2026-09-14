@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"log/slog"
 	"time"
 )
 
@@ -55,8 +56,7 @@ type ConsumerConfig struct {
 	Tracing *TracingConfig
 
 	// Logging
-	LogLevel LogLevel
-	Logger   Logger
+	Logger *slog.Logger
 
 	// Escape hatch
 	Raw map[string]any
@@ -269,23 +269,19 @@ func ConsumerWithTracing(tracing *TracingConfig) ConsumerOption {
 	}
 }
 
-// ConsumerWithLogLevel sets the log level for consumer
-func ConsumerWithLogLevel(level LogLevel) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.LogLevel = level
-	}
-}
-
-// ConsumerWithLogger sets a custom logger for consumer
-func ConsumerWithLogger(logger Logger) ConsumerOption {
+// ConsumerWithLogger sets a custom logger for consumer. The default is
+// slog.Default(); silence it with ConsumerWithLogger(slog.New(slog.DiscardHandler)).
+func ConsumerWithLogger(logger *slog.Logger) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Logger = logger
 	}
 }
 
-// ConsumerWithRawConfig merges raw librdkafka consumer configuration keys,
-// overriding anything the library itself set. Use it for keys this library
-// does not model (e.g. "fetch.min.bytes", "max.partition.fetch.bytes").
+// ConsumerWithRawConfig merges raw librdkafka consumer configuration keys.
+// Raw overrides the connection/auth keys only (bootstrap.servers, SSL/SASL);
+// builder-level keys (group.id, enable.auto.commit) are set after the merge
+// and win. Use it for keys this library does not model (e.g.
+// "fetch.min.bytes", "max.partition.fetch.bytes").
 func ConsumerWithRawConfig(raw map[string]any) ConsumerOption {
 	return func(c *ConsumerConfig) { c.Raw = raw }
 }
@@ -301,6 +297,5 @@ func newDefaultConsumerConfig() *ConsumerConfig {
 		AutoCommit:         true,
 		AutoCommitInterval: DefaultAutoCommitInterval,
 		PartitionAssignor:  AssignorRange,
-		LogLevel:           LogLevelInfo,
 	}
 }

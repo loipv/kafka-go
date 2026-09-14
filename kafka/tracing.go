@@ -46,9 +46,20 @@ func NewTracingService(config *TracingConfig) *TracingService {
 
 	return &TracingService{
 		tracer:     otel.Tracer(tracerName, trace.WithInstrumentationVersion(tracerVersion)),
-		propagator: otel.GetTextMapPropagator(),
+		propagator: defaultPropagator(),
 		config:     config,
 	}
+}
+
+// defaultPropagator falls back to W3C Trace Context when the otel global is
+// the zero-propagator (its default) — otherwise the library's headline
+// tracing feature silently injected nothing.
+func defaultPropagator() propagation.TextMapPropagator {
+	p := otel.GetTextMapPropagator()
+	if len(p.Fields()) == 0 {
+		return propagation.TraceContext{}
+	}
+	return p
 }
 
 // StartProducerSpan starts a new span for producing a message

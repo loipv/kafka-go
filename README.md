@@ -15,7 +15,7 @@ A production-ready Go library for Kafka client and consumer functionality built 
 - **OpenTelemetry Tracing**: Distributed tracing across produce → consume with same trace ID
 - **Health Checks**: Built-in health indicators
 - **Graceful Shutdown**: Proper cleanup on application shutdown
-- **Custom Logger**: Pluggable logging interface
+- **Structured Logging**: `log/slog` integration
 
 ## Installation
 
@@ -59,7 +59,7 @@ kafka-go/
 │   ├── dlq.go                # DLQ, Circuit Breaker, Idempotency
 │   ├── health.go             # Health checks
 │   ├── tracing.go            # OpenTelemetry tracing
-│   └── logger.go             # Logger interface
+│   └── errors.go             # Sentinel errors
 ├── examples/                 # Usage examples
 │   ├── producer/             # Producer example
 │   ├── consumer/             # Batch consumer with DLQ
@@ -202,9 +202,8 @@ client, err := kafka.NewProducer(
         Multiplier:       2.0,
     }),
 
-    // Optional - Logging
-    kafka.WithLogLevel(kafka.LogLevelInfo),
-    kafka.ProducerWithLogger(customLogger), // Custom logger implementation
+    // Optional - Logging (defaults to slog.Default())
+    kafka.ProducerWithLogger(slog.Default()),
 
     // Optional - Tracing
     kafka.ProducerWithTracing(&kafka.TracingConfig{
@@ -658,39 +657,16 @@ metrics := consumer.DLQMetrics()
 | `x-dlq-reprocess-timestamp` | Timestamp of reprocess |
 | `x-final-dlq-reason` | Reason sent to final DLQ |
 
-## Custom Logger
+## Logging
 
-The library supports custom logging via the `Logger` interface:
+The library logs through `log/slog` (`*slog.Logger`). The default is
+`slog.Default()`; pass any `*slog.Logger` to customize:
 
 ```go
-// Logger interface
-type Logger interface {
-    Debug(format string, args ...interface{})
-    Info(format string, args ...interface{})
-    Warn(format string, args ...interface{})
-    Error(format string, args ...interface{})
-}
-
-// Use custom logger
-type MyLogger struct{}
-
-func (l *MyLogger) Debug(format string, args ...interface{}) {
-    // Your implementation
-}
-func (l *MyLogger) Info(format string, args ...interface{}) {
-    // Your implementation
-}
-func (l *MyLogger) Warn(format string, args ...interface{}) {
-    // Your implementation
-}
-func (l *MyLogger) Error(format string, args ...interface{}) {
-    // Your implementation
-}
-
 // Use with client
 client, _ := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
-    kafka.ProducerWithLogger(&MyLogger{}),
+    kafka.ProducerWithLogger(slog.Default()),
 )
 
 // Use with consumer
@@ -698,13 +674,13 @@ consumer, _ := kafka.NewConsumer(
     kafka.ConsumerWithBrokers("localhost:9092"),
     kafka.ConsumerWithGroupID("my-group"),
     kafka.ConsumerWithTopics("orders"),
-    kafka.ConsumerWithLogger(&MyLogger{}),
+    kafka.ConsumerWithLogger(slog.Default()),
 )
 
-// Or use the default no-op logger to disable logging
+// Silence library logging entirely
 client, _ := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
-    kafka.ProducerWithLogger(kafka.NewNoopLogger()),
+    kafka.ProducerWithLogger(slog.New(slog.DiscardHandler)),
 )
 ```
 
@@ -1035,15 +1011,6 @@ const (
     CircuitClosed   CircuitState = "CLOSED"
     CircuitOpen     CircuitState = "OPEN"
     CircuitHalfOpen CircuitState = "HALF_OPEN"
-)
-
-// Log levels
-const (
-    LogLevelNone  LogLevel = 0
-    LogLevelError LogLevel = 1
-    LogLevelWarn  LogLevel = 2
-    LogLevelInfo  LogLevel = 3
-    LogLevelDebug LogLevel = 4
 )
 ```
 

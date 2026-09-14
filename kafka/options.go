@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"log/slog"
 	"time"
 )
 
@@ -25,8 +26,7 @@ type ProducerConfig struct {
 	Retry *RetryConfig
 
 	// Logging
-	LogLevel LogLevel
-	Logger   Logger
+	Logger *slog.Logger
 
 	// Tracing
 	Tracing *TracingConfig
@@ -66,7 +66,7 @@ type TracingConfig struct {
 type ProducerOption func(*ProducerConfig)
 
 // Default values
-var (
+const (
 	DefaultConnectionTimeout    = 10 * time.Second
 	DefaultRequestTimeout       = 30 * time.Second
 	DefaultSessionTimeout       = 30 * time.Second
@@ -85,7 +85,7 @@ var (
 	DefaultRetryMaxInterval     = 30 * time.Second
 )
 
-// ==================== Client Options ====================
+// ==================== Producer Options ====================
 
 // ProducerWithBrokers sets the Kafka broker addresses
 func ProducerWithBrokers(brokers ...string) ProducerOption {
@@ -157,15 +157,9 @@ func ProducerWithRetry(retry *RetryConfig) ProducerOption {
 	}
 }
 
-// WithLogLevel sets the log level
-func WithLogLevel(level LogLevel) ProducerOption {
-	return func(c *ProducerConfig) {
-		c.LogLevel = level
-	}
-}
-
-// ProducerWithLogger sets a custom logger
-func ProducerWithLogger(logger Logger) ProducerOption {
+// ProducerWithLogger sets a custom logger. The default is slog.Default();
+// silence it with ProducerWithLogger(slog.New(slog.DiscardHandler)).
+func ProducerWithLogger(logger *slog.Logger) ProducerOption {
 	return func(c *ProducerConfig) {
 		c.Logger = logger
 	}
@@ -178,9 +172,11 @@ func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
 	}
 }
 
-// ProducerWithRawConfig merges raw librdkafka producer configuration keys,
-// overriding anything the library itself set. Use it for keys this library
-// does not model (e.g. "linger.ms", "queue.buffering.max.messages").
+// ProducerWithRawConfig merges raw librdkafka producer configuration keys.
+// Raw overrides the connection/auth keys only (bootstrap.servers, SSL/SASL);
+// builder-level keys (acks, compression, retries) are set after the merge and
+// win. Use it for keys this library does not model (e.g. "linger.ms",
+// "queue.buffering.max.messages").
 func ProducerWithRawConfig(raw map[string]any) ProducerOption {
 	return func(c *ProducerConfig) { c.Raw = raw }
 }
@@ -200,6 +196,5 @@ func newDefaultProducerConfig() *ProducerConfig {
 		RequestTimeout:    DefaultRequestTimeout,
 		Acks:              AcksAll,
 		Compression:       CompressionNone,
-		LogLevel:          LogLevelInfo,
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -90,7 +91,7 @@ func main() {
 		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
 		// Logging
-		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
+		kafka.ConsumerWithLogger(slog.Default()),
 
 		// Rebalance callback for partition management
 		kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {

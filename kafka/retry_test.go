@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -19,7 +20,7 @@ func TestExecuteWithRetryCapsDelay(t *testing.T) {
 			Multiplier:      2,
 			MaxInterval:     150 * time.Millisecond,
 		}},
-		logger:  NewNoopLogger(),
+		logger:  slog.New(slog.DiscardHandler),
 		metrics: NewDLQMetricsCollector(),
 		after:   time.After, // executeWithRetry sleeps through this seam
 	}
@@ -81,7 +82,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 					ch <- time.Now()
 					return ch
 				},
-				metrics: NewDLQMetricsCollector(), logger: NewNoopLogger()}
+				metrics: NewDLQMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 			calls := 0
 			c.messageHandler = func(_ context.Context, _ *Message) error {
 				calls++
@@ -113,7 +114,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 func TestExecuteWithRetryContextCancel(t *testing.T) {
 	c := &Consumer{config: &ConsumerConfig{Retry: &RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}},
 		after:   func(d time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
-		metrics: NewDLQMetricsCollector(), logger: NewNoopLogger()}
+		metrics: NewDLQMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

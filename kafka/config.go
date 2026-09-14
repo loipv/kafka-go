@@ -15,8 +15,10 @@ type connConfig struct {
 	ClientID string
 	SSL      bool
 	SASL     *SASLConfig
-	// Raw is merged last — the escape hatch for librdkafka keys this
-	// library does not model (e.g. queued.max.messages.kbytes).
+	// Raw is merged last within the connection/auth map — the escape hatch
+	// for librdkafka keys this library does not model (e.g.
+	// queued.max.messages.kbytes). Builder-level keys (acks, group.id, ...)
+	// are applied after the merge and are not overridable via Raw.
 	Raw map[string]any
 }
 
