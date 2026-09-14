@@ -106,11 +106,14 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 
 	// max.poll.interval.ms is contested by three features (explicit
 	// RebalanceTimeout, the in-loop retry budget, the DLQ retry sleep).
-	// Floor it at librdkafka's 300s default so wiring a low explicit value
-	// can never make batch consumers MORE fragile.
+	// Take the max of all three, floored at librdkafka's 300s default, so
+	// wiring a low explicit value can never make batch consumers MORE
+	// fragile: max(explicit, retryBudget*1.5, 300s).
 	mpiMs := 300000
 	if c.RebalanceTimeout > 0 {
-		mpiMs = int(c.RebalanceTimeout.Milliseconds())
+		if explicit := int(c.RebalanceTimeout.Milliseconds()); explicit > mpiMs {
+			mpiMs = explicit
+		}
 	}
 	if b := retryBudget(c.Retry); b > 0 {
 		if need := int(float64(b.Milliseconds()) * 1.5); need > mpiMs {

@@ -98,7 +98,6 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		config:          config,
 		logger:          logger,
 		done:            make(chan struct{}),
-		loopExited:      make(chan struct{}),
 		flushCh:         make(chan struct{}, 1),
 		batch:           make([]*Message, 0, config.BatchSize),
 		circuitBreakers: make(map[string]*CircuitBreaker),
@@ -153,6 +152,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return fmt.Errorf("no handler registered; call OnMessage/OnBatch/OnGroupedBatch before Start") // #17
 	}
+	// Publish a fresh exit signal per Start (before the CAS, so Close can
+	// never observe running==1 without a published channel): restarting a
+	// consumer whose previous loop already exited must not double-close.
+	c.mu.Lock()
+	c.loopExited = make(chan struct{})
+	c.mu.Unlock()
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
 		return fmt.Errorf("consumer is already running")
@@ -228,8 +233,11 @@ func (c *Consumer) Close(ctx context.Context) error {
 	// Wait for the main loop to leave ReadMessage before destroying the
 	// handle: consumer.Close() during an in-flight cgo poll segfaults.
 	if wasRunning {
+		c.mu.RLock()
+		loopExited := c.loopExited
+		c.mu.RUnlock()
 		select {
-		case <-c.loopExited:
+		case <-loopExited:
 		case <-time.After(5 * time.Second):
 			c.logger.Warn("consumer loop did not exit within 5s; closing anyway")
 		}
@@ -394,6 +402,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	switch c.processMessage(ctx, msg) {
 	case outcomeParked:
+		c.clearBlockedOnPark(msg)
 		c.storeOffsets([]*Message{msg})
 	case outcomeBlocked:
 		c.blockMessages(ctx, []*Message{msg})
@@ -421,6 +430,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 	maxRetries := DefaultRetryMaxRetries
 	initialInterval := DefaultRetryInitialInterval
 	multiplier := DefaultRetryMultiplier
+	maxInterval := DefaultRetryMaxInterval
 	skipOnMaxRetries := false
 
 	if c.config.Retry != nil {
@@ -432,6 +442,9 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 		}
 		if c.config.Retry.Multiplier > 0 {
 			multiplier = c.config.Retry.Multiplier
+		}
+		if c.config.Retry.MaxInterval > 0 {
+			maxInterval = c.config.Retry.MaxInterval
 		}
 		skipOnMaxRetries = c.config.Retry.SkipOnMaxRetries
 	}
@@ -455,6 +468,9 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 				return ctx.Err(), attempt + 1
 			case <-time.After(delay):
 				delay = time.Duration(float64(delay) * multiplier)
+				if delay > maxInterval {
+					delay = maxInterval // retryBudget assumes capped sleeps — keep them capped
+				}
 			}
 		}
 	}
@@ -562,6 +578,9 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 	if blocked {
 		c.blockMessages(ctx, batch)
 		return outcomeBlocked
+	}
+	for _, msg := range batch {
+		c.clearBlockedOnPark(msg)
 	}
 	c.storeOffsets(batch)
 	return outcomeParked
@@ -855,10 +874,16 @@ func (c *Consumer) Commit(msgs ...*Message) error {
 	return err
 }
 
-// blockState is the per-partition blocked bookkeeping.
+// blockState is the per-partition blocked bookkeeping. offset is the lowest
+// blocked offset seen — a forward seek must never overwrite it (queued
+// messages can re-block with a higher offset, which would strand the
+// original). Entries survive resumes: blocks escalate until the message
+// finally parks (clearBlockedOnPark) or the partition is revoked.
 type blockState struct {
 	retryAt time.Time
 	blocks  int
+	offset  int64
+	resumed bool
 }
 
 // blockMessages pauses the affected partitions, seeks them back to the
@@ -882,24 +907,41 @@ func (c *Consumer) blockMessages(ctx context.Context, msgs []*Message) {
 	c.blockMu.Lock()
 	for tp, off := range minOff {
 		bs := c.blocked[tp]
+		if bs.blocks == 0 || off < bs.offset {
+			bs.offset = off
+		}
 		bs.blocks++
+		bs.resumed = false
 		bs.retryAt = now.Add(blockBackoff(bs.blocks, c.config.Retry))
 		c.blocked[tp] = bs
 		topic := tp.Topic
-		paused = append(paused, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(off)})
-		c.logger.Warn("partition blocked — message unparkable (topic=%s partition=%d offset=%d retryIn=%v)",
-			tp.Topic, tp.Partition, off, blockBackoff(bs.blocks, c.config.Retry))
+		paused = append(paused, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(bs.offset)})
+		c.logger.Warn("partition blocked — message unparkable (topic=%s partition=%d offset=%d blocks=%d retryIn=%v)",
+			tp.Topic, tp.Partition, bs.offset, bs.blocks, blockBackoff(bs.blocks, c.config.Retry))
 	}
 	c.blockMu.Unlock()
 	c.metrics.SetBlocked(c.blockedSnapshot())
-	_ = c.consumer.Pause(paused)
+	if err := c.consumer.Pause(paused); err != nil {
+		c.logger.Error("pause failed for blocked partition (next pass re-attempts): %v", err)
+	}
 	for _, tp := range paused {
-		_ = c.consumer.Seek(tp, 5000)
+		if err := c.consumer.Seek(tp, 5000); err != nil {
+			t := ""
+			if tp.Topic != nil {
+				t = *tp.Topic
+			}
+			c.logger.Error("seek failed for blocked partition (topic=%s partition=%d offset=%d): %v",
+				t, tp.Partition, tp.Offset, err)
+		}
 	}
 }
 
 // resumeBlocked resumes partitions whose backoff elapsed. Called each poll
-// pass. Skips partitions while the user-level Pause() is active.
+// pass. Skips partitions while the user-level Pause() is active. Entries are
+// NOT deleted here: blocks must keep escalating across cycles until the
+// message finally parks (clearBlockedOnPark) — deleting on resume would reset
+// the backoff to InitialInterval and make a poison partition retry flat-out
+// forever.
 func (c *Consumer) resumeBlocked() {
 	if atomic.LoadInt32(&c.paused) == 1 {
 		return
@@ -908,15 +950,33 @@ func (c *Consumer) resumeBlocked() {
 	var toResume []ckafka.TopicPartition
 	c.blockMu.Lock()
 	for tp, bs := range c.blocked {
-		if now.After(bs.retryAt) {
+		if !bs.resumed && now.After(bs.retryAt) {
+			bs.resumed = true
+			c.blocked[tp] = bs
 			topic := tp.Topic
 			toResume = append(toResume, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition})
-			delete(c.blocked, tp)
 		}
 	}
 	c.blockMu.Unlock()
 	if len(toResume) > 0 {
-		_ = c.consumer.Resume(toResume)
+		if err := c.consumer.Resume(toResume); err != nil {
+			c.logger.Error("resume failed for blocked partition (next pass re-attempts): %v", err)
+		}
+	}
+}
+
+// clearBlockedOnPark drops the blocked state for a partition once its message
+// parked at or past the blocked offset — a success resets the escalation.
+func (c *Consumer) clearBlockedOnPark(msg *Message) {
+	tp := TopicPartition{Topic: msg.Topic, Partition: msg.Partition}
+	cleared := false
+	c.blockMu.Lock()
+	if bs, ok := c.blocked[tp]; ok && msg.Offset >= bs.offset {
+		delete(c.blocked, tp)
+		cleared = true
+	}
+	c.blockMu.Unlock()
+	if cleared {
 		c.metrics.SetBlocked(c.blockedSnapshot())
 	}
 }

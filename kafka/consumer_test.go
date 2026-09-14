@@ -285,6 +285,26 @@ func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
 	}
 }
 
+// A parked message at or past the blocked offset clears the escalation state;
+// a park below it (an earlier offset) must not.
+func TestClearBlockedOnPark(t *testing.T) {
+	c := &Consumer{blocked: map[TopicPartition]blockState{
+		{Topic: "t", Partition: 0}: {retryAt: time.Now(), blocks: 3, offset: 5},
+	}, metrics: NewDLQMetricsCollector()}
+
+	c.clearBlockedOnPark(&Message{Topic: "t", Partition: 0, Offset: 4})
+	if len(c.blockedSnapshot()) != 1 {
+		t.Fatal("park below the blocked offset must not clear state")
+	}
+	c.clearBlockedOnPark(&Message{Topic: "t", Partition: 0, Offset: 5})
+	if len(c.blockedSnapshot()) != 0 {
+		t.Error("park at the blocked offset must clear state")
+	}
+	if got := c.metrics.GetMetrics().BlockedPartitions; len(got) != 0 {
+		t.Errorf("blocked gauge = %+v, want drained", got)
+	}
+}
+
 func TestStartRequiresHandler(t *testing.T) {
 	skipIfShort(t) // no broker needed, but keeps policy uniform
 	c, err := NewConsumer(ConsumerWithBrokers("localhost:9092"),

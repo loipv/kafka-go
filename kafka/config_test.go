@@ -146,6 +146,17 @@ func TestBuildConsumerConfig(t *testing.T) {
 			t.Errorf("max.poll.interval.ms = %v, want 450000", v)
 		}
 	})
+	t.Run("explicit low RebalanceTimeout cannot drop below the 300s floor", func(t *testing.T) {
+		c := base()
+		c.RebalanceTimeout = 10 * time.Second
+		cm, err := buildConsumerConfig(c)
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 300000 {
+			t.Errorf("max.poll.interval.ms = %v, want 300000 (floor)", v)
+		}
+	})
 	t.Run("explicit RebalanceTimeout wins when above the floor", func(t *testing.T) {
 		c := base()
 		c.RebalanceTimeout = 600 * time.Second
