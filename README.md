@@ -473,7 +473,9 @@ processed twice; that is what `ConsumerWithIdempotencyKey` is for.
 
 **Skipping instead of blocking.** Set `RetryConfig.SkipOnMaxRetries: true` to
 restore the old lossy behavior: after max retries the error handler fires, the
-DLQ (if configured) receives the message, and the offset advances.
+DLQ (if configured) receives the message, and the offset advances. If the DLQ
+is configured but unavailable, the message is dropped — that is the accepted
+meaning of the loss opt-in (best-effort DLQ, then advance).
 
 **Producer side.** `Produce`/`ProduceBatch`/`ProduceMultiTopicBatch` are
 synchronous and return errors. `ProduceAsync` cannot — a failed delivery is
@@ -819,7 +821,7 @@ The test suite runs in three tiers:
 | Tier | Covers | Needs Docker? |
 |------|--------|---------------|
 | Unit | Pure logic: config maps, retry math, tracing carriers, circuit breaker | No |
-| Mock broker | Send/consume round-trips, delivery reports, commit/resume, DLQ, blocked partitions, broker-down | No — `kafka.NewMockCluster` runs in-process |
+| Mock broker | Produce/consume round-trips, delivery reports, commit/resume, DLQ, blocked partitions, broker-down | No — `kafka.NewMockCluster` runs in-process |
 | Integration | SASL/TLS auth regression, cooperative rebalance with two consumers, real consumer lag | Yes — testcontainers + Redpanda |
 
 ```bash

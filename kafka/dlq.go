@@ -115,8 +115,7 @@ func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Mess
 	// Wait for delivery
 	select {
 	case e := <-deliveryChan:
-		m := e.(*ckafka.Message)
-		if m.TopicPartition.Error != nil {
+		if m, ok := e.(*ckafka.Message); ok && m.TopicPartition.Error != nil {
 			return fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
 		}
 		s.metrics.IncrementSentToDLQ(topic)

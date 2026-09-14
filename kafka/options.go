@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ProducerConfig holds all client configuration
+// ProducerConfig holds all producer configuration
 type ProducerConfig struct {
 	// Connection
 	Brokers           []string
@@ -174,9 +174,9 @@ func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
 
 // ProducerWithRawConfig merges raw librdkafka producer configuration keys.
 // Raw overrides the connection/auth keys only (bootstrap.servers, SSL/SASL);
-// builder-level keys (acks, compression, retries) are set after the merge and
-// win. Use it for keys this library does not model (e.g. "linger.ms",
-// "queue.buffering.max.messages").
+// builder-level keys (acks, compression.type, enable.idempotence, retries)
+// are set after the merge and win. Use it for keys this library does not
+// model (e.g. "linger.ms", "queue.buffering.max.messages").
 func ProducerWithRawConfig(raw map[string]any) ProducerOption {
 	return func(c *ProducerConfig) { c.Raw = raw }
 }

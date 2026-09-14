@@ -225,7 +225,10 @@ func (c *Consumer) Start(ctx context.Context) error {
 	}
 }
 
-// Close closes the consumer
+// Close closes the consumer. Cancel the Start context before calling Close
+// when handlers or retries can exceed the internal wait: without a cancel,
+// Close falls back to a bounded 5s wait for the consume loop and may then
+// close the handle while a long retry is still in flight.
 func (c *Consumer) Close(ctx context.Context) error {
 	wasRunning := atomic.LoadInt32(&c.running) == 1
 	// Use atomic CAS to ensure only one Close can succeed
@@ -474,6 +477,8 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 			select {
 			case <-ctx.Done():
 				return attempt + 1, ctx.Err()
+			case <-c.done: // Close() without ctx cancel: stop retrying, report the last error
+				return attempt + 1, lastErr
 			case <-c.after(delay):
 				delay = time.Duration(float64(delay) * multiplier)
 				if delay > maxInterval {
@@ -891,7 +896,8 @@ const (
 )
 
 // Commit stores and commits offsets for the given messages. With no
-// arguments it commits everything stored so far. Offsets are committed at
+// arguments it commits everything stored so far — offsets are stored only
+// when messages are parked, not on consumption. Offsets are committed at
 // max(msg.Offset)+1 per (topic, partition).
 func (c *Consumer) Commit(msgs ...*Message) error {
 	if len(msgs) == 0 {

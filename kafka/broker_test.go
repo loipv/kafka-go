@@ -619,6 +619,50 @@ func TestDLQBrokerDown_BlocksInsteadOfDropping(t *testing.T) {
 	}
 }
 
+// Proof: with the DLQ circuit breaker OPEN, handleError blocks the message
+// without attempting any produce — a tripped DLQ breaker must not become a
+// firehose into a struggling DLQ. Determinism note: opening the breaker
+// "organically" (failing exactly one DLQ produce via a broker-down gate) is
+// racy — the flap window can let the produce succeed — so this pins the seam
+// directly: the real NewConsumer breaker is forced open via RecordFailure
+// (FailureThreshold=1), then handleError runs synchronously and the DLQ
+// produce must never fire (MessagesSentToDLQ unchanged).
+func TestAtLeastOnce_CircuitBreakerOpen_Blocks(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	source := uniqueTopic(t, mc, 1)
+	dlqTopic := uniqueTopic(t, mc, 1)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic,
+			CircuitBreaker: &CircuitBreakerConfig{FailureThreshold: 1, SuccessThreshold: 1, Timeout: 10 * time.Minute}}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer c.Close(context.Background())
+
+	cb := c.circuitBreakers[dlqTopic]
+	if cb == nil {
+		t.Fatal("no circuit breaker registered for the DLQ topic")
+	}
+	cb.RecordFailure() // FailureThreshold=1 → open; 10m Timeout keeps it open
+	if got := c.CircuitState(dlqTopic); got != CircuitOpen {
+		t.Fatalf("CircuitState = %v after one failure at threshold 1, want open", got)
+	}
+
+	before := c.DLQMetrics().Global.MessagesSentToDLQ
+	if got := c.handleError(context.Background(), errors.New("handler always fails"),
+		&Message{Topic: source, Partition: 0, Offset: 0}, 1); got != outcomeBlocked {
+		t.Fatalf("handleError with the circuit open = %v, want outcomeBlocked", got)
+	}
+	if got := c.DLQMetrics().Global.MessagesSentToDLQ; got != before {
+		t.Errorf("MessagesSentToDLQ = %d after the blocked handleError, want %d (no produce may be attempted)", got, before)
+	}
+}
+
 // The Seek/pause buffer caveat: while partition 0 sits blocked, messages
 // queued behind it must never let the committed offset drift past the
 // blocked message — and the sibling partition keeps flowing.

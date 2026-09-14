@@ -279,9 +279,10 @@ func ConsumerWithLogger(logger *slog.Logger) ConsumerOption {
 
 // ConsumerWithRawConfig merges raw librdkafka consumer configuration keys.
 // Raw overrides the connection/auth keys only (bootstrap.servers, SSL/SASL);
-// builder-level keys (group.id, enable.auto.commit) are set after the merge
-// and win. Use it for keys this library does not model (e.g.
-// "fetch.min.bytes", "max.partition.fetch.bytes").
+// builder-level keys (group.id, enable.auto.commit, enable.auto.offset.store,
+// max.poll.interval.ms) are set after the merge and win. Use it for keys this
+// library does not model (e.g. "fetch.min.bytes",
+// "max.partition.fetch.bytes").
 func ConsumerWithRawConfig(raw map[string]any) ConsumerOption {
 	return func(c *ConsumerConfig) { c.Raw = raw }
 }

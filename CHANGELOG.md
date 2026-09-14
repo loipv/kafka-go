@@ -52,7 +52,8 @@ ports all of them in one pass.
 ### Changed signatures
 
 - `Consumer` gains `Commit(msgs ...*Message) error` — explicit offset commit;
-  zero args commits everything consumed.
+  zero args commits everything stored (offsets are stored only when messages
+  are parked).
 - `WithLogger` / `ConsumerWithLogger` take `*slog.Logger`.
 - `ErrorHandler` becomes `func(ctx context.Context, msg *Message, err error) error`
   (was `func(err error, msg *Message)`) — `ctx` first, `error` last, and the
@@ -134,7 +135,9 @@ All 33 review findings, highlights:
 
 ### Dependencies
 
-- OpenTelemetry indirect bump v1.28 → v1.35 (`otel`, `otel/trace`, `otel/metric`).
+- OpenTelemetry bump v1.28 → v1.35. `otel` and `otel/trace` are direct
+  requires (only `otel/metric` is indirect), so every user's otel moves to
+  v1.35.
 - `toolchain go1.24.10` (go.mod now `go 1.24.0`).
 - testcontainers-go v0.40.0 + `modules/redpanda` v0.40.0 — test-only, behind
   the `integration` build tag, not in the default build graph.
