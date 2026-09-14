@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"maps"
 	"strconv"
 	"sync"
@@ -18,15 +17,13 @@ type DLQService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *DLQMetricsCollector
-	logger   *slog.Logger
 	closed   int32 // atomic: 0=open, 1=closed
 	after    func(time.Duration) <-chan time.Time
 }
 
 // newDLQService creates a new DLQ service. It builds its producer from the
-// same connConfig as the parent consumer, so SSL/SASL is never dropped. The
-// logger comes from the parent consumer (already defaulted, never nil).
-func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector, logger *slog.Logger) (*DLQService, error) {
+// same connConfig as the parent consumer, so SSL/SASL is never dropped.
+func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector) (*DLQService, error) {
 	cm := cc.configMap()
 	cm["acks"] = -1 // All replicas
 
@@ -39,7 +36,6 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 		producer: producer,
 		config:   config,
 		metrics:  metrics,
-		logger:   logger,
 		after:    time.After,
 	}, nil
 }

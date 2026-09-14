@@ -19,6 +19,8 @@ func TestTracingServiceInjectsWithoutGlobalPropagator(t *testing.T) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator()) // the no-op default
 
 	sr := tracetest.NewSpanRecorder()
+	origTP := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
 
 	svc := NewTracingService(&TracingConfig{Enabled: true})
