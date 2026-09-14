@@ -60,7 +60,7 @@ ports all of them in one pass.
   return value lets the handler claim ownership of the message.
 - `HealthResult.Error` is `string` (`json:"error,omitzero"`).
 - `Default*` values are `const`.
-- Minimum Go 1.24.
+- Minimum Go 1.24.10.
 
 ### Changed behavior (same signature)
 
@@ -138,7 +138,7 @@ All 33 review findings, highlights:
 - OpenTelemetry bump v1.28 → v1.35. `otel` and `otel/trace` are direct
   requires (only `otel/metric` is indirect), so every user's otel moves to
   v1.35.
-- `toolchain go1.24.10` (go.mod now `go 1.24.0`).
+- `go 1.24.10` go.mod directive (toolchain line no longer needed).
 - testcontainers-go v0.40.0 + `modules/redpanda` v0.40.0 — test-only, behind
   the `integration` build tag, not in the default build graph.
 
