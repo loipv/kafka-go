@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -73,248 +74,102 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	return client, nil
 }
 
-// Produce sends a single message to a topic
-func (c *Producer) Produce(ctx context.Context, topic string, msg *Message) error {
-	if atomic.LoadInt32(&c.closed) == 1 {
-		return fmt.Errorf("client is closed")
-	}
-
-	kafkaMsg := c.buildKafkaMessage(topic, msg)
-
-	// Add tracing
-	var endSpan func(error)
-	if c.tracer != nil {
-		ctx, endSpan = c.tracer.StartProducerSpan(ctx, topic, msg)
-		c.tracer.InjectTraceContext(ctx, kafkaMsg)
-	}
-
-	deliveryChan := make(chan ckafka.Event, 1)
-	err := c.producer.Produce(kafkaMsg, deliveryChan)
-	if err != nil {
-		if endSpan != nil {
-			endSpan(err)
-		}
-		return fmt.Errorf("failed to produce message: %w", err)
-	}
-
-	// Wait for delivery report
-	select {
-	case e := <-deliveryChan:
-		m := e.(*ckafka.Message)
-		if m.TopicPartition.Error != nil {
-			if endSpan != nil {
-				endSpan(m.TopicPartition.Error)
-			}
-			return fmt.Errorf("delivery failed: %w", m.TopicPartition.Error)
-		}
-		if endSpan != nil {
-			endSpan(nil)
-		}
-		return nil
-	case <-ctx.Done():
-		if endSpan != nil {
-			endSpan(ctx.Err())
-		}
-		return ctx.Err()
-	}
+// Produce sends a single message to a topic and waits for its delivery report.
+func (p *Producer) Produce(ctx context.Context, topic string, msg *Message) error {
+	return p.produceAndAwait(ctx, []*ckafka.Message{p.prepareMessage(ctx, topic, msg)})
 }
 
-// ProduceBatch sends multiple messages to a single topic
-func (c *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {
-	if atomic.LoadInt32(&c.closed) == 1 {
-		return fmt.Errorf("client is closed")
-	}
-
+// ProduceBatch sends multiple messages to one topic and waits for all reports.
+func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {
 	if len(msgs) == 0 {
 		return nil
 	}
-
-	type messageWithSpan struct {
-		kafkaMsg *ckafka.Message
-		endSpan  func(error)
+	km := make([]*ckafka.Message, 0, len(msgs))
+	for _, m := range msgs {
+		km = append(km, p.prepareMessage(ctx, topic, m))
 	}
-
-	msgsWithSpans := make([]messageWithSpan, 0, len(msgs))
-	var produceErrors []error
-
-	for _, msg := range msgs {
-		kafkaMsg := c.buildKafkaMessage(topic, msg)
-
-		var endSpan func(error)
-		if c.tracer != nil {
-			msgCtx, es := c.tracer.StartProducerSpan(ctx, topic, msg)
-			c.tracer.InjectTraceContext(msgCtx, kafkaMsg)
-			endSpan = es
-		}
-
-		msgsWithSpans = append(msgsWithSpans, messageWithSpan{
-			kafkaMsg: kafkaMsg,
-			endSpan:  endSpan,
-		})
-	}
-
-	// Create delivery channel for all messages
-	deliveryChan := make(chan ckafka.Event, len(msgs))
-	producedCount := 0
-
-	for _, mws := range msgsWithSpans {
-		err := c.producer.Produce(mws.kafkaMsg, deliveryChan)
-		if err != nil {
-			produceErrors = append(produceErrors, err)
-			if mws.endSpan != nil {
-				mws.endSpan(err)
-			}
-		} else {
-			producedCount++
-		}
-	}
-
-	// Wait for all delivery reports
-	deliveryErrors := make(map[int]error)
-	for i := 0; i < producedCount; i++ {
-		select {
-		case e := <-deliveryChan:
-			m := e.(*ckafka.Message)
-			if m.TopicPartition.Error != nil {
-				deliveryErrors[i] = m.TopicPartition.Error
-			}
-		case <-ctx.Done():
-			// End all remaining spans with context error
-			for j := i; j < len(msgsWithSpans); j++ {
-				if msgsWithSpans[j].endSpan != nil {
-					msgsWithSpans[j].endSpan(ctx.Err())
-				}
-			}
-			return ctx.Err()
-		}
-	}
-
-	// End all spans with appropriate errors
-	deliveryIdx := 0
-	for i, mws := range msgsWithSpans {
-		if mws.endSpan != nil {
-			// Check if this message had a produce error
-			if i < len(produceErrors) && produceErrors[i] != nil {
-				// Already ended in produce loop
-				continue
-			}
-			// Check delivery error
-			if err, ok := deliveryErrors[deliveryIdx]; ok {
-				mws.endSpan(err)
-			} else {
-				mws.endSpan(nil)
-			}
-			deliveryIdx++
-		}
-	}
-
-	// Collect all errors
-	allErrors := append(produceErrors, mapValuesToSlice(deliveryErrors)...)
-	if len(allErrors) > 0 {
-		return fmt.Errorf("failed to send %d messages: %v", len(allErrors), allErrors)
-	}
-
-	return nil
+	return p.produceAndAwait(ctx, km)
 }
 
-// ProduceMultiTopicBatch sends messages to multiple topics
-func (c *Producer) ProduceMultiTopicBatch(ctx context.Context, batches []TopicBatch) error {
-	if atomic.LoadInt32(&c.closed) == 1 {
-		return fmt.Errorf("client is closed")
+// ProduceMultiTopicBatch sends messages to multiple topics and waits for all reports.
+func (p *Producer) ProduceMultiTopicBatch(ctx context.Context, batches []TopicBatch) error {
+	total := 0
+	for _, b := range batches {
+		total += len(b.Messages)
 	}
-
-	totalMsgs := 0
-	for _, batch := range batches {
-		totalMsgs += len(batch.Messages)
-	}
-
-	if totalMsgs == 0 {
+	if total == 0 {
 		return nil
 	}
-
-	type messageWithSpan struct {
-		kafkaMsg *ckafka.Message
-		endSpan  func(error)
-	}
-
-	msgsWithSpans := make([]messageWithSpan, 0, totalMsgs)
-	var produceErrors []error
-
-	for _, batch := range batches {
-		for _, msg := range batch.Messages {
-			kafkaMsg := c.buildKafkaMessage(batch.Topic, msg)
-
-			var endSpan func(error)
-			if c.tracer != nil {
-				msgCtx, es := c.tracer.StartProducerSpan(ctx, batch.Topic, msg)
-				c.tracer.InjectTraceContext(msgCtx, kafkaMsg)
-				endSpan = es
-			}
-
-			msgsWithSpans = append(msgsWithSpans, messageWithSpan{
-				kafkaMsg: kafkaMsg,
-				endSpan:  endSpan,
-			})
+	km := make([]*ckafka.Message, 0, total)
+	for _, b := range batches {
+		for _, m := range b.Messages {
+			km = append(km, p.prepareMessage(ctx, b.Topic, m))
 		}
 	}
+	return p.produceAndAwait(ctx, km)
+}
 
-	// Create delivery channel
-	deliveryChan := make(chan ckafka.Event, totalMsgs)
-	producedCount := 0
-
-	for _, mws := range msgsWithSpans {
-		err := c.producer.Produce(mws.kafkaMsg, deliveryChan)
-		if err != nil {
-			produceErrors = append(produceErrors, err)
-			if mws.endSpan != nil {
-				mws.endSpan(err)
-			}
-		} else {
-			producedCount++
-		}
+// prepareMessage builds the wire message and stashes the span ender in
+// Opaque — the delivery report hands the same closure back, so correlation
+// is by identity, never by index.
+func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Message) *ckafka.Message {
+	km := p.buildKafkaMessage(topic, msg)
+	if p.tracer != nil {
+		msgCtx, end := p.tracer.StartProducerSpan(ctx, topic, msg)
+		p.tracer.InjectTraceContext(msgCtx, km)
+		km.Opaque = end
 	}
+	return km
+}
 
-	// Wait for all delivery reports
-	deliveryErrors := make(map[int]error)
-	for i := 0; i < producedCount; i++ {
+func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
+	if atomic.LoadInt32(&p.closed) == 1 {
+		return fmt.Errorf("producer is closed")
+	}
+	deliveryChan := make(chan ckafka.Event, len(msgs))
+	var errs []error
+	pending := 0
+	for _, m := range msgs {
+		if err := p.producer.Produce(m, deliveryChan); err != nil {
+			endSpan(m, err) // no report will ever arrive for this message
+			errs = append(errs, err)
+			continue
+		}
+		pending++
+	}
+	for i := 0; i < pending; i++ {
 		select {
 		case e := <-deliveryChan:
-			m := e.(*ckafka.Message)
-			if m.TopicPartition.Error != nil {
-				deliveryErrors[i] = m.TopicPartition.Error
-			}
-		case <-ctx.Done():
-			for j := i; j < len(msgsWithSpans); j++ {
-				if msgsWithSpans[j].endSpan != nil {
-					msgsWithSpans[j].endSpan(ctx.Err())
-				}
-			}
-			return ctx.Err()
-		}
-	}
-
-	// End all spans
-	deliveryIdx := 0
-	for i, mws := range msgsWithSpans {
-		if mws.endSpan != nil {
-			if i < len(produceErrors) && produceErrors[i] != nil {
+			m, ok := e.(*ckafka.Message)
+			if !ok {
 				continue
 			}
-			if err, ok := deliveryErrors[deliveryIdx]; ok {
-				mws.endSpan(err)
+			if m.TopicPartition.Error != nil {
+				endSpan(m, m.TopicPartition.Error)
+				errs = append(errs, fmt.Errorf("delivery failed for topic %s partition %d: %w",
+					topicOf(m), m.TopicPartition.Partition, m.TopicPartition.Error))
 			} else {
-				mws.endSpan(nil)
+				endSpan(m, nil)
 			}
-			deliveryIdx++
+		case <-ctx.Done():
+			return errors.Join(append(errs, ctx.Err())...)
 		}
 	}
+	return errors.Join(errs...)
+}
 
-	allErrors := append(produceErrors, mapValuesToSlice(deliveryErrors)...)
-	if len(allErrors) > 0 {
-		return fmt.Errorf("failed to send %d messages: %v", len(allErrors), allErrors)
+func endSpan(m *ckafka.Message, err error) {
+	if end, ok := m.Opaque.(func(error)); ok {
+		end(err)
+		m.Opaque = nil
 	}
+}
 
-	return nil
+func topicOf(m *ckafka.Message) string {
+	if m.TopicPartition.Topic == nil {
+		return ""
+	}
+	return *m.TopicPartition.Topic
 }
 
 // ProduceAsync queues a message for automatic batching
@@ -374,10 +229,6 @@ func (c *Producer) buildKafkaMessage(topic string, msg *Message) *ckafka.Message
 
 	if msg.Key != nil {
 		kafkaMsg.Key = msg.Key
-	}
-
-	if msg.Partition != 0 {
-		kafkaMsg.TopicPartition.Partition = msg.Partition
 	}
 
 	if !msg.Timestamp.IsZero() {
@@ -473,12 +324,4 @@ func getCompressionName(compression Compression) string {
 	default:
 		return "none"
 	}
-}
-
-func mapValuesToSlice(m map[int]error) []error {
-	result := make([]error, 0, len(m))
-	for _, v := range m {
-		result = append(result, v)
-	}
-	return result
 }
