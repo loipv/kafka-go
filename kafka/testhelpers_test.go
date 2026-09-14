@@ -36,6 +36,14 @@ func uniqueTopic(t *testing.T, mc *ckafka.MockCluster, partitions int) string {
 	return name
 }
 
+// uniqueGroupName returns a per-run consumer group ID. Group-ID reuse across
+// tests is the #1 flake source (stale offsets from an earlier run).
+func uniqueGroupName(t *testing.T) string {
+	t.Helper()
+	return strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")) +
+		"_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
 // waitFor polls cond until deadline. Fixed sleeps are future flakes.
 func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
 	t.Helper()

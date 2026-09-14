@@ -24,15 +24,19 @@ type Consumer struct {
 	groupedBatchHandler GroupedBatchHandler
 
 	// State - using atomic for hot path operations
-	mu      sync.RWMutex
-	running int32 // atomic: 0=stopped, 1=running
-	paused  int32 // atomic: 0=running, 1=paused
-	closed  int32 // atomic: 0=open, 1=closed
+	mu           sync.RWMutex
+	running      int32 // atomic: 0=stopped, 1=running
+	paused       int32 // atomic: 0=running, 1=paused
+	pauseApplied int32 // atomic: pause/resume actually applied to librdkafka
+	closed       int32 // atomic: 0=open, 1=closed
+
+	// Lifecycle / batch flush
+	done    chan struct{} // closed by Close; stops helper goroutines
+	flushCh chan struct{} // cap 1: batch-flush signal consumed in the main loop (#18)
 
 	// Batch processing
-	batchMu    sync.Mutex
-	batch      []*Message
-	batchTimer *time.Timer
+	batchMu sync.Mutex
+	batch   []*Message
 
 	// Idempotency
 	idempotencyStore *IdempotencyStore
@@ -83,6 +87,8 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		consumer:        consumer,
 		config:          config,
 		logger:          logger,
+		done:            make(chan struct{}),
+		flushCh:         make(chan struct{}, 1),
 		batch:           make([]*Message, 0, config.BatchSize),
 		circuitBreakers: make(map[string]*CircuitBreaker),
 		dlqMetrics:      NewDLQMetricsCollector(),
@@ -132,23 +138,24 @@ func (c *Consumer) OnGroupedBatch(handler GroupedBatchHandler) {
 
 // Start starts consuming messages (blocking)
 func (c *Consumer) Start(ctx context.Context) error {
+	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
+		return fmt.Errorf("no handler registered; call OnMessage/OnBatch/OnGroupedBatch before Start") // #17
+	}
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
 		return fmt.Errorf("consumer is already running")
 	}
+	defer atomic.StoreInt32(&c.running, 0) // #8: every exit path releases
 
-	// Subscribe to topics with optional rebalance callback
-	rebalanceCb := c.createRebalanceCallback()
-	if err := c.consumer.SubscribeTopics(c.config.Topics, rebalanceCb); err != nil {
+	// Subscribe to topics; the rebalance callback is always installed so the
+	// library's own commit/assign logic runs even without a user callback (#31)
+	if err := c.consumer.SubscribeTopics(c.config.Topics, c.rebalanceCallback()); err != nil {
 		return fmt.Errorf("failed to subscribe to topics: %w", err)
 	}
 
-	// Start batch timer if batch processing is enabled
+	// Start batch flush ticker if batch processing is enabled
 	if c.config.BatchProcessing {
-		c.batchMu.Lock()
-		c.batchTimer = time.NewTimer(c.config.BatchTimeout)
-		c.batchMu.Unlock()
-		go c.batchTimeoutHandler(ctx)
+		go c.batchFlushLoop(ctx)
 	}
 
 	// Start DLQ retry consumer if configured
@@ -161,17 +168,15 @@ func (c *Consumer) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-c.flushCh:
+			c.processBatch(ctx)
 		default:
-			// Fast path: check paused state with atomic load (no lock)
-			if atomic.LoadInt32(&c.paused) == 1 {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
+			c.reconcilePause() // #12: real pause, reconciled every pass
 
 			msg, err := c.consumer.ReadMessage(100 * time.Millisecond)
 			if err != nil {
 				// Timeout is normal, continue
-				if kafkaErr, ok := err.(ckafka.Error); ok && kafkaErr.Code() == ckafka.ErrTimedOut {
+				if ke, ok := err.(ckafka.Error); ok && ke.Code() == ckafka.ErrTimedOut {
 					continue
 				}
 				// Log other errors but continue
@@ -186,7 +191,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 			if c.config.BatchProcessing {
 				c.addToBatch(ctx, message)
 			} else {
-				c.processMessage(ctx, message)
+				c.processMessage(ctx, message) // Task 9 renames to deliver
 			}
 		}
 	}
@@ -200,17 +205,13 @@ func (c *Consumer) Close(ctx context.Context) error {
 	}
 	atomic.StoreInt32(&c.running, 0)
 
+	// Stop helper goroutines (batch flush ticker, DLQ retry consumer)
+	close(c.done)
+
 	// Process remaining batch
 	if c.config.BatchProcessing {
 		c.processBatch(ctx)
 	}
-
-	// Stop batch timer
-	c.batchMu.Lock()
-	if c.batchTimer != nil {
-		c.batchTimer.Stop()
-	}
-	c.batchMu.Unlock()
 
 	// Close DLQ service
 	if c.dlqService != nil {
@@ -233,6 +234,38 @@ func (c *Consumer) Pause() {
 // Resume resumes consumption
 func (c *Consumer) Resume() {
 	atomic.StoreInt32(&c.paused, 0)
+}
+
+// reconcilePause applies the user-visible Pause/Resume to the current
+// assignment. librdkafka resets pause state on every rebalance, so this
+// must run continuously rather than once — and Assignment() is empty before
+// the first rebalance completes, which the len check absorbs.
+func (c *Consumer) reconcilePause() {
+	want := atomic.LoadInt32(&c.paused) == 1
+	applied := atomic.LoadInt32(&c.pauseApplied) == 1
+	if want == applied {
+		return
+	}
+	partitions, err := c.consumer.Assignment()
+	if err != nil || len(partitions) == 0 {
+		return
+	}
+	var perr error
+	if want {
+		perr = c.consumer.Pause(partitions)
+	} else {
+		perr = c.consumer.Resume(partitions)
+	}
+	if perr == nil {
+		atomic.StoreInt32(&c.pauseApplied, boolToInt32(want))
+	}
+}
+
+func boolToInt32(b bool) int32 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // DLQMetrics returns DLQ metrics
@@ -323,12 +356,23 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) {
 	}
 }
 
+// invokeHandler dispatches a single message to whichever handler the user
+// registered, wrapping it into a batch or grouped batch as needed. Start
+// rejects a handler-less consumer, so exactly one branch fires.
+func (c *Consumer) invokeHandler(ctx context.Context, msg *Message) error {
+	switch {
+	case c.messageHandler != nil:
+		return c.messageHandler(ctx, msg)
+	case c.batchHandler != nil:
+		return c.batchHandler(ctx, []*Message{msg})
+	case c.groupedBatchHandler != nil:
+		return c.groupedBatchHandler(ctx, []GroupedBatch{{Key: string(msg.Key), Messages: []*Message{msg}}})
+	}
+	return nil
+}
+
 // executeWithRetry executes the handler with retry logic
 func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) error {
-	if c.messageHandler == nil {
-		return nil
-	}
-
 	maxRetries := DefaultRetryMaxRetries
 	initialInterval := DefaultRetryInitialInterval
 	multiplier := DefaultRetryMultiplier
@@ -351,7 +395,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) error {
 	delay := initialInterval
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err := c.messageHandler(ctx, msg)
+		err := c.invokeHandler(ctx, msg)
 		if err == nil {
 			return nil
 		}
@@ -434,18 +478,6 @@ func (c *Consumer) processBatch(ctx context.Context) {
 	}
 	batch := c.batch
 	c.batch = make([]*Message, 0, c.config.BatchSize)
-
-	// Reset timer safely while holding the lock
-	if c.batchTimer != nil {
-		// Stop and drain the timer
-		if !c.batchTimer.Stop() {
-			select {
-			case <-c.batchTimer.C:
-			default:
-			}
-		}
-		c.batchTimer.Reset(c.config.BatchTimeout)
-	}
 	c.batchMu.Unlock()
 
 	// Start tracing span
@@ -524,22 +556,24 @@ func (c *Consumer) handleBatchError(ctx context.Context, err error, batch []*Mes
 	}
 }
 
-// batchTimeoutHandler handles batch timeout
-func (c *Consumer) batchTimeoutHandler(ctx context.Context) {
+// batchFlushLoop ticks every BatchTimeout and signals the main loop to flush.
+// It never processes the batch itself — flushing on two goroutines raced the
+// main loop's own size-triggered flush (#18). The non-blocking send collapses
+// multiple ticks into one pending flush.
+func (c *Consumer) batchFlushLoop(ctx context.Context) {
+	t := time.NewTicker(c.config.BatchTimeout)
+	defer t.Stop()
 	for {
-		c.batchMu.Lock()
-		timer := c.batchTimer
-		c.batchMu.Unlock()
-
-		if timer == nil {
-			return
-		}
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
-			c.processBatch(ctx)
+		case <-c.done:
+			return
+		case <-t.C:
+			select {
+			case c.flushCh <- struct{}{}:
+			default: // a flush is already pending
+			}
 		}
 	}
 }
@@ -661,78 +695,79 @@ func (c *Consumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic 
 	}
 }
 
-// createRebalanceCallback creates a ckafka.RebalanceCb from the user's RebalanceCallback
-func (c *Consumer) createRebalanceCallback() ckafka.RebalanceCb {
-	if c.config.RebalanceCallback == nil {
-		return nil
-	}
-
+// rebalanceCallback is ALWAYS installed (even without a user callback) so the
+// library's own commit-before-revoke runs (#31). Under a cooperative assignor,
+// Assign/Unassign would replace the whole assignment mid-rebalance — an
+// API violation — so the protocol is checked and incremental variants used (#32).
+func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 	return func(consumer *ckafka.Consumer, event ckafka.Event) error {
+		cooperative := consumer.GetRebalanceProtocol() == "COOPERATIVE"
 		switch e := event.(type) {
 		case ckafka.AssignedPartitions:
-			c.logger.Info("Partitions assigned: %v", e.Partitions)
+			c.logger.Info("Partitions assigned: %d", len(e.Partitions))
+			atomic.StoreInt32(&c.pauseApplied, 0) // rebalance resets librdkafka pause state
 
-			// Convert to our TopicPartition type
-			partitions := make([]TopicPartition, len(e.Partitions))
-			for i, tp := range e.Partitions {
-				partitions[i] = TopicPartition{
-					Topic:     *tp.Topic,
-					Partition: tp.Partition,
-					Offset:    int64(tp.Offset),
+			// Call user's callback
+			if c.config.RebalanceCallback != nil {
+				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "assigned", Partitions: convertPartitions(e.Partitions)}); err != nil {
+					c.logger.Error("Rebalance callback error on assign: %v", err)
+					return err
 				}
 			}
 
-			// Call user's callback
-			if err := c.config.RebalanceCallback(RebalanceEvent{
-				Type:       "assigned",
-				Partitions: partitions,
-			}); err != nil {
-				c.logger.Error("Rebalance callback error on assign: %v", err)
-				return err
+			if cooperative {
+				return consumer.IncrementalAssign(e.Partitions) // #32
 			}
-
-			// Assign partitions to consumer
 			return consumer.Assign(e.Partitions)
 
 		case ckafka.RevokedPartitions:
-			c.logger.Info("Partitions revoked: %v", e.Partitions)
-
-			// Convert to our TopicPartition type
-			partitions := make([]TopicPartition, len(e.Partitions))
-			for i, tp := range e.Partitions {
-				partitions[i] = TopicPartition{
-					Topic:     *tp.Topic,
-					Partition: tp.Partition,
-					Offset:    int64(tp.Offset),
-				}
-			}
+			c.logger.Info("Partitions revoked: %d", len(e.Partitions))
 
 			// Call user's callback
-			if err := c.config.RebalanceCallback(RebalanceEvent{
-				Type:       "revoked",
-				Partitions: partitions,
-			}); err != nil {
-				c.logger.Error("Rebalance callback error on revoke: %v", err)
-				return err
+			if c.config.RebalanceCallback != nil {
+				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "revoked", Partitions: convertPartitions(e.Partitions)}); err != nil {
+					c.logger.Error("Rebalance callback error on revoke: %v", err)
+					return err
+				}
 			}
 
 			// Commit any pending offsets before unassigning (if auto-commit is disabled)
 			if !c.config.AutoCommit {
 				if _, err := consumer.Commit(); err != nil {
 					// Ignore "no offset stored" errors
-					if kafkaErr, ok := err.(ckafka.Error); !ok || kafkaErr.Code() != ckafka.ErrNoOffset {
+					if ke, ok := err.(ckafka.Error); !ok || ke.Code() != ckafka.ErrNoOffset {
 						c.logger.Warn("Failed to commit offsets during rebalance: %v", err)
 					}
 				}
 			}
 
-			// Unassign partitions
+			c.dropBlockedFor(e.Partitions) // no-op until Task 9
+
+			if cooperative {
+				return consumer.IncrementalUnassign(e.Partitions) // #32
+			}
 			return consumer.Unassign()
 		}
 
 		return nil
 	}
 }
+
+// convertPartitions converts ckafka.TopicPartition to our TopicPartition type
+func convertPartitions(ps []ckafka.TopicPartition) []TopicPartition {
+	out := make([]TopicPartition, len(ps))
+	for i, tp := range ps {
+		out[i] = TopicPartition{Partition: tp.Partition, Offset: int64(tp.Offset)}
+		if tp.Topic != nil {
+			out[i].Topic = *tp.Topic
+		}
+	}
+	return out
+}
+
+// dropBlockedFor drops blocked-partition bookkeeping for the given partitions.
+// No-op stub; Task 9 implements it.
+func (c *Consumer) dropBlockedFor(ps []ckafka.TopicPartition) {}
 
 // Helper functions
 

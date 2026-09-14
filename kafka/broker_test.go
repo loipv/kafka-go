@@ -91,3 +91,37 @@ func TestProduceBatchReportsFailureWhenBrokerDown(t *testing.T) {
 		t.Fatal("ProduceBatch() = nil with broker down, want joined delivery error")
 	}
 }
+
+func TestBatchFlushByTimeout(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	got := make(chan int, 4)
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithFromBeginning(true),
+		ConsumerWithBatchProcessing(true), ConsumerWithBatchSize(10),
+		ConsumerWithBatchTimeout(300*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(_ context.Context, msgs []*Message) error {
+		got <- len(msgs)
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+
+	p, _ := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	defer p.Close()
+	for i := 0; i < 3; i++ {
+		if err := p.Produce(context.Background(), topic, &Message{Value: []byte("x")}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	waitFor(t, 10*time.Second, func() bool { return len(got) > 0 }, "batch never flushed by timeout")
+	if n := <-got; n != 3 {
+		t.Errorf("batch size = %d, want 3 (flushed by timeout below BatchSize)", n)
+	}
+}
