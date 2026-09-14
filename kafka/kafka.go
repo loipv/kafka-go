@@ -46,4 +46,3 @@ package kafka
 
 // Version of the library
 const Version = "1.0.0"
-

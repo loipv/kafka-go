@@ -46,7 +46,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  ctx.Err(),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": ctx.Err().Error(),
 			},
 		}
@@ -61,7 +61,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -82,7 +82,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -93,7 +93,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  fmt.Errorf("no brokers available"),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": "no brokers available",
 			},
 		}
@@ -101,7 +101,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 
 	return &HealthResult{
 		Status: HealthStatusUp,
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"brokers":       len(metadata.Brokers),
 			"topics":        len(metadata.Topics),
 			"originatingId": metadata.OriginatingBroker.ID,
@@ -117,7 +117,7 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  ctx.Err(),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": ctx.Err().Error(),
 			},
 		}
@@ -131,7 +131,7 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -152,15 +152,15 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
 	}
 
-	brokerInfos := make([]map[string]interface{}, 0, len(metadata.Brokers))
+	brokerInfos := make([]map[string]any, 0, len(metadata.Brokers))
 	for _, broker := range metadata.Brokers {
-		brokerInfos = append(brokerInfos, map[string]interface{}{
+		brokerInfos = append(brokerInfos, map[string]any{
 			"id":   broker.ID,
 			"host": broker.Host,
 			"port": broker.Port,
@@ -169,7 +169,7 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 
 	return &HealthResult{
 		Status: HealthStatusUp,
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"brokers":     brokerInfos,
 			"brokerCount": len(metadata.Brokers),
 		},
@@ -184,7 +184,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  ctx.Err(),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": ctx.Err().Error(),
 			},
 		}
@@ -198,7 +198,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -211,7 +211,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -230,7 +230,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  fmt.Errorf("consumer group not found: %s", groupID),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error":   "consumer group not found",
 				"groupId": groupID,
 			},
@@ -243,7 +243,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -253,7 +253,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  fmt.Errorf("no group description found"),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error":   "no group description found",
 				"groupId": groupID,
 			},
@@ -270,7 +270,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -278,7 +278,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 
 	// Calculate total lag
 	var totalLag int64
-	var lagDetails []map[string]interface{}
+	var lagDetails []map[string]any
 
 	for _, groupOffsets := range offsetResult.ConsumerGroupsTopicPartitions {
 		for _, tp := range groupOffsets.Partitions {
@@ -289,7 +289,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 			// Get end offset for partition
 			// Note: This requires creating a consumer to get watermark offsets
 			// For simplicity, we'll just report the committed offset
-			lagDetails = append(lagDetails, map[string]interface{}{
+			lagDetails = append(lagDetails, map[string]any{
 				"topic":     *tp.Topic,
 				"partition": tp.Partition,
 				"offset":    int64(tp.Offset),
@@ -305,7 +305,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 
 	return &HealthResult{
 		Status: status,
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"groupId":     groupID,
 			"state":       groupDesc.State.String(),
 			"memberCount": len(groupDesc.Members),
@@ -324,7 +324,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  ctx.Err(),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": ctx.Err().Error(),
 			},
 		}
@@ -338,7 +338,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 			},
 		}
@@ -359,7 +359,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  err,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": err.Error(),
 				"topic": topic,
 			},
@@ -371,7 +371,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  fmt.Errorf("topic not found: %s", topic),
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": "topic not found",
 				"topic": topic,
 			},
@@ -382,16 +382,16 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  topicMeta.Error,
-			Details: map[string]interface{}{
+			Details: map[string]any{
 				"error": topicMeta.Error.String(),
 				"topic": topic,
 			},
 		}
 	}
 
-	partitionInfos := make([]map[string]interface{}, 0, len(topicMeta.Partitions))
+	partitionInfos := make([]map[string]any, 0, len(topicMeta.Partitions))
 	for _, p := range topicMeta.Partitions {
-		partitionInfos = append(partitionInfos, map[string]interface{}{
+		partitionInfos = append(partitionInfos, map[string]any{
 			"id":       p.ID,
 			"leader":   p.Leader,
 			"replicas": len(p.Replicas),
@@ -401,11 +401,10 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 
 	return &HealthResult{
 		Status: HealthStatusUp,
-		Details: map[string]interface{}{
+		Details: map[string]any{
 			"topic":          topic,
 			"partitionCount": len(topicMeta.Partitions),
 			"partitions":     partitionInfos,
 		},
 	}
 }
-

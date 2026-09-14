@@ -1,0 +1,9 @@
+coverage.out
+coverage.html
+*.test
+*.out
+bin/
+dist/
+.DS_Store
+.idea/
+.vscode/

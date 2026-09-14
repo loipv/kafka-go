@@ -207,4 +207,3 @@ func saveCheckpoint(topic string, partition int32, offset int64) {
 	jsonData, _ := json.Marshal(data)
 	log.Printf("Saving checkpoint: %s", string(jsonData))
 }
-

@@ -333,4 +333,3 @@ func newDefaultConsumerConfig() *ConsumerConfig {
 		LogLevel:              LogLevelInfo,
 	}
 }
-

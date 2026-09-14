@@ -26,7 +26,7 @@ go get github.com/loipv/kafka-go
 
 ### Requirements
 
-- Go 1.21+
+- Go 1.24+
 - librdkafka (required by confluent-kafka-go)
 
 ### Platform Support

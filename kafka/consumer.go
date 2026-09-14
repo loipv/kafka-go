@@ -823,4 +823,3 @@ func getOffsetReset(fromBeginning bool) string {
 func appendTime(buf []byte, t time.Time) []byte {
 	return t.AppendFormat(buf, time.RFC3339)
 }
-

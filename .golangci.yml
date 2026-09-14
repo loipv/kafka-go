@@ -1,0 +1,11 @@
+version: "2"
+run:
+  timeout: 5m
+  build-tags: [integration]
+linters:
+  default: standard
+  enable:
+    - revive
+    - errorlint
+    - copyloopvar
+    - nilerr

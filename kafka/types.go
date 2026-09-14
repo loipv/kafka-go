@@ -40,7 +40,7 @@ type MessagePool struct {
 func NewMessagePool() *MessagePool {
 	return &MessagePool{
 		pool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return &Message{}
 			},
 		},
@@ -161,9 +161,9 @@ const (
 
 // HealthResult represents health check result
 type HealthResult struct {
-	Status  HealthStatus           `json:"status"`
-	Details map[string]interface{} `json:"details,omitempty"`
-	Error   error                  `json:"error,omitempty"`
+	Status  HealthStatus   `json:"status"`
+	Details map[string]any `json:"details,omitempty"`
+	Error   error          `json:"error,omitempty"`
 }
 
 // CircuitState represents circuit breaker states
@@ -305,4 +305,3 @@ type DLQTopicMetrics struct {
 	SentToDLQ         int64 `json:"sentToDlq"`
 	ReprocessAttempts int64 `json:"reprocessAttempts"`
 }
-

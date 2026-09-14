@@ -41,7 +41,7 @@ func NewTracingService(config *TracingConfig) *TracingService {
 
 	tracerVersion := config.TracerVersion
 	if tracerVersion == "" {
-		tracerVersion = "1.0.0"
+		tracerVersion = Version
 	}
 
 	return &TracingService{
@@ -249,4 +249,3 @@ func (c *messageHeaderCarrier) Keys() []string {
 	}
 	return keys
 }
-

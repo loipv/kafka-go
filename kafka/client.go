@@ -527,4 +527,3 @@ func mapValuesToSlice(m map[int]error) []error {
 	}
 	return result
 }
-
