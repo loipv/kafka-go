@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ type DLQService struct {
 	metrics  *DLQMetricsCollector
 	logger   Logger
 	closed   int32 // atomic: 0=open, 1=closed
+	after    func(time.Duration) <-chan time.Time
 }
 
 // newDLQService creates a new DLQ service. It builds its producer from the
@@ -40,30 +42,51 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 		config:   config,
 		metrics:  metrics,
 		logger:   logger,
+		after:    time.After,
 	}, nil
 }
 
-// SendToDLQ sends a failed message to the DLQ. attempts is the number of
-// handler invocations spent on the message (1 = first try, no retry).
+// produceToDLQ sends a failed message to the DLQ topic. The caller's Message
+// is never mutated — DLQ headers go on a shallow copy. The produce is
+// confirmed by a delivery report and retried per DLQConfig before giving up.
 func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
-		return fmt.Errorf("DLQ service is closed")
+		return fmt.Errorf("dlq service is closed")
 	}
+	out := *msg
+	out.Headers = maps.Clone(msg.Headers) // nil-safe
 
-	// Add DLQ headers
-	if msg.Headers == nil {
-		msg.Headers = make(Headers, 4) // Pre-size for common headers
-	}
-	msg.Headers["x-dlq-original-topic"] = []byte(msg.Topic)
-	msg.Headers["x-dlq-timestamp"] = time.Now().AppendFormat(nil, time.RFC3339)
-
+	out.SetHeader("x-dlq-original-topic", []byte(msg.Topic))
+	out.SetHeader("x-dlq-timestamp", time.Now().AppendFormat(nil, time.RFC3339))
+	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // #9: the real count
 	if s.config.IncludeErrorInfo && err != nil {
-		msg.Headers["x-dlq-error-message"] = []byte(err.Error())
+		out.SetHeader("x-dlq-error-message", []byte(err.Error()))
 	}
 
-	msg.Headers["x-dlq-handler-retry-count"] = []byte(strconv.Itoa(attempts))
+	return s.produceWithRetry(ctx, s.config.Topic, &out)
+}
 
-	return s.produceToTopic(ctx, s.config.Topic, msg)
+// produceWithRetry retries the DLQ produce per DLQConfig.MaxRetries /
+// RetryDelay / RetryBackoffMultiplier — a failed produce used to drop the
+// message after one attempt (#10-adjacent gap).
+func (s *DLQService) produceWithRetry(ctx context.Context, topic string, msg *Message) error {
+	maxRetries, delay := s.config.MaxRetries, s.config.RetryDelay
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = s.produceToTopic(ctx, topic, msg)
+		if lastErr == nil {
+			return nil
+		}
+		if attempt >= maxRetries {
+			return fmt.Errorf("dlq produce failed after %d attempts: %w", attempt+1, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.after(delay):
+			delay = time.Duration(float64(delay) * s.config.RetryBackoffMultiplier)
+		}
+	}
 }
 
 // SendToTopic sends a message to a specific topic
@@ -128,7 +151,8 @@ type CircuitBreaker struct {
 	failures        int
 	successes       int
 	lastFailureTime time.Time
-	mu              sync.Mutex // Use Mutex instead of RWMutex to avoid lock upgrade issues
+	now             func() time.Time // seam for tests; defaults to time.Now
+	mu              sync.Mutex       // Use Mutex instead of RWMutex to avoid lock upgrade issues
 }
 
 // NewCircuitBreaker creates a new circuit breaker
@@ -136,6 +160,7 @@ func NewCircuitBreaker(config *CircuitBreakerConfig) *CircuitBreaker {
 	return &CircuitBreaker{
 		config: config,
 		state:  CircuitClosed,
+		now:    time.Now,
 	}
 }
 
@@ -146,7 +171,7 @@ func (cb *CircuitBreaker) State() CircuitState {
 
 	// Check if we should transition from open to half-open
 	if cb.state == CircuitOpen {
-		if time.Since(cb.lastFailureTime) >= cb.config.Timeout {
+		if cb.now().Sub(cb.lastFailureTime) >= cb.config.Timeout {
 			cb.state = CircuitHalfOpen
 			cb.successes = 0
 		}
@@ -180,7 +205,7 @@ func (cb *CircuitBreaker) RecordFailure() {
 	defer cb.mu.Unlock()
 
 	cb.failures++
-	cb.lastFailureTime = time.Now()
+	cb.lastFailureTime = cb.now()
 
 	if cb.state == CircuitClosed {
 		if cb.failures >= cb.config.FailureThreshold {
@@ -336,15 +361,19 @@ func (m *DLQMetricsCollector) ResetMetrics() {
 
 // IdempotencyStore stores processed message keys for idempotency
 type IdempotencyStore struct {
-	store  map[string]time.Time
-	ttl    time.Duration
-	mu     sync.RWMutex
-	done   chan struct{}
-	ticker *time.Ticker
+	store     map[string]time.Time
+	ttl       time.Duration
+	mu        sync.RWMutex
+	done      chan struct{}
+	ticker    *time.Ticker
+	closeOnce sync.Once
 }
 
 // NewIdempotencyStore creates a new idempotency store
 func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
+	if ttl <= 0 { // time.NewTicker(0) panics — clamp instead
+		ttl = DefaultIdempotencyTTL
+	}
 	s := &IdempotencyStore{
 		store:  make(map[string]time.Time),
 		ttl:    ttl,
@@ -384,10 +413,12 @@ func (s *IdempotencyStore) Remove(key string) {
 	delete(s.store, key)
 }
 
-// Close closes the idempotency store
+// Close closes the idempotency store. Safe to call more than once.
 func (s *IdempotencyStore) Close() {
-	close(s.done)
-	s.ticker.Stop()
+	s.closeOnce.Do(func() {
+		close(s.done)
+		s.ticker.Stop()
+	})
 }
 
 // Size returns the number of keys in the store

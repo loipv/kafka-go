@@ -47,6 +47,10 @@ type Consumer struct {
 	dlqService *DLQService
 	metrics    *DLQMetricsCollector
 
+	// after is the sleep seam for retry waits; tests swap it to make
+	// backoff cycles instantaneous. Defaults to time.After.
+	after func(time.Duration) <-chan time.Time
+
 	// Circuit breaker for DLQ
 	circuitBreakers map[string]*CircuitBreaker
 	cbMu            sync.RWMutex
@@ -103,6 +107,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		circuitBreakers: make(map[string]*CircuitBreaker),
 		metrics:         NewDLQMetricsCollector(),
 		blocked:         make(map[TopicPartition]blockState),
+		after:           time.After,
 	}
 
 	// Initialize tracing if enabled
@@ -467,7 +472,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 			select {
 			case <-ctx.Done():
 				return ctx.Err(), attempt + 1
-			case <-time.After(delay):
+			case <-c.after(delay):
 				delay = time.Duration(float64(delay) * multiplier)
 				if delay > maxInterval {
 					delay = maxInterval // retryBudget assumes capped sleeps — keep them capped
@@ -691,6 +696,23 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 	cm["auto.offset.reset"] = getOffsetReset(retryConfig.FromBeginning)
 	cm["enable.auto.commit"] = false // Task 10 makes commit-after-success explicit
 
+	// The retry consumer sleeps in-process between redeliveries
+	// (processDLQRetry); a sleep past max.poll.interval.ms would evict it
+	// from the group. Floor: max(300s, retryBudget*1.5, worstRetryDelay*1.5).
+	// ponytail: computed poll floor instead of pause+poll — upgrade if DLQ retry throughput ever matters
+	worstDelay := retryConfig.Delay
+	for i := 1; i < retryConfig.MaxRetries; i++ {
+		worstDelay = time.Duration(float64(worstDelay) * retryConfig.BackoffMultiplier)
+	}
+	mpi := 300 * time.Second
+	if need := time.Duration(float64(retryBudget(c.config.Retry)) * 1.5); need > mpi {
+		mpi = need
+	}
+	if need := time.Duration(float64(worstDelay) * 1.5); need > mpi {
+		mpi = need
+	}
+	cm["max.poll.interval.ms"] = int(mpi.Milliseconds())
+
 	dlqConsumer, err := ckafka.NewConsumer(&cm)
 	if err != nil {
 		c.logger.Error("Failed to create DLQ retry consumer: %v", err)
@@ -702,6 +724,8 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 		c.logger.Error("Failed to subscribe to DLQ topic: %v", err)
 		return
 	}
+
+	commit := func() error { _, err := dlqConsumer.Commit(); return err }
 
 	c.logger.Info("DLQ retry consumer started for topic: %s", dlqTopic)
 
@@ -721,71 +745,69 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 
 			// Convert and process
 			message := c.convertMessage(msg)
-			c.processDLQRetry(ctx, message, retryConfig)
+			c.processDLQRetry(ctx, message, retryConfig, commit)
 		}
 	}
 }
 
-// processDLQRetry processes a DLQ retry message
-func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DLQRetryConfig) {
+// processDLQRetry processes a DLQ retry message. The consumer it runs on has
+// enable.auto.commit=false, so commit is explicit: only after a successful
+// reprocess or a final-DLQ handoff does the offset advance — a failure leaves
+// the message to be redelivered (#10).
+func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DLQRetryConfig, commit func() error) {
 	c.metrics.IncrementReprocessAttempts(msg.Topic)
 
-	// Get retry count from headers - use strconv for better performance
 	retryCount := 0
 	if countBytes, ok := msg.Headers["x-dlq-reprocess-count"]; ok {
 		retryCount, _ = strconv.Atoi(string(countBytes))
 	}
-
-	// Check if max retries exceeded
 	if retryCount >= config.MaxRetries {
-		c.logger.Warn("DLQ max retries exceeded for message, sending to final DLQ")
+		c.logger.Warn("dlq max retries exceeded — sending to final dlq")
 		if config.FinalDLQTopic != "" {
-			c.sendToFinalDLQ(ctx, msg, config.FinalDLQTopic)
+			if err := c.sendToFinalDLQ(ctx, msg, config.FinalDLQTopic); err != nil {
+				c.logger.Error("final dlq produce failed: %v", err)
+				return // not committed — genuinely re-picked-up
+			}
+		}
+		if err := commit(); err != nil {
+			c.logger.Warn("dlq retry commit failed: %v", err)
 		}
 		return
 	}
 
-	// Calculate delay with backoff
 	delay := config.Delay
 	for i := 0; i < retryCount; i++ {
 		delay = time.Duration(float64(delay) * config.BackoffMultiplier)
 	}
-
-	c.logger.Debug("DLQ retry: waiting %v before reprocessing (attempt %d/%d)", delay, retryCount+1, config.MaxRetries)
-
-	// Wait before reprocessing
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(delay):
+	case <-c.after(delay):
 	}
 
-	// Update retry count - use strconv for better performance
-	msg.Headers["x-dlq-reprocess-count"] = []byte(strconv.Itoa(retryCount + 1))
-	msg.Headers["x-dlq-reprocess-timestamp"] = appendTime(nil, time.Now())
+	msg.SetHeader("x-dlq-reprocess-count", []byte(strconv.Itoa(retryCount+1))) // #2 fixed via SetHeader
+	msg.SetHeader("x-dlq-reprocess-timestamp", appendTime(nil, time.Now()))
 
-	// Reprocess message
-	err := c.messageHandler(ctx, msg)
-	if err != nil {
+	if err := c.invokeHandler(ctx, msg); err != nil { // #1: was c.messageHandler — nil panic
 		c.metrics.IncrementReprocessFailures()
-		c.logger.Warn("DLQ reprocess failed: %v", err)
-		// Will be picked up again from DLQ
-	} else {
-		c.metrics.IncrementReprocessSuccesses()
-		c.logger.Info("DLQ message reprocessed successfully")
+		c.logger.Warn("dlq reprocess failed — will be redelivered: %v", err)
+		return // NOT committed — the claim the old comment made, now true (#10)
+	}
+	c.metrics.IncrementReprocessSuccesses()
+	if err := commit(); err != nil {
+		c.logger.Warn("dlq retry commit failed: %v", err)
 	}
 }
 
 // sendToFinalDLQ sends message to final DLQ
-func (c *Consumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic string) {
-	msg.Headers["x-final-dlq-reason"] = []byte("max retries exceeded")
-	msg.Headers["x-final-dlq-timestamp"] = appendTime(nil, time.Now())
+func (c *Consumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic string) error {
+	msg.SetHeader("x-final-dlq-reason", []byte("max retries exceeded"))
+	msg.SetHeader("x-final-dlq-timestamp", appendTime(nil, time.Now()))
 
-	if c.dlqService != nil {
-		if err := c.dlqService.produceToTopic(ctx, finalTopic, msg); err != nil {
-			c.logger.Error("Failed to send to final DLQ: %v", err)
-		}
+	if c.dlqService == nil {
+		return fmt.Errorf("dlq service not configured")
 	}
+	return c.dlqService.produceToTopic(ctx, finalTopic, msg)
 }
 
 // rebalanceCallback is ALWAYS installed (even without a user callback) so the

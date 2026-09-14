@@ -19,6 +19,14 @@ type Message struct {
 	Topic     string
 }
 
+// SetHeader sets a header, lazily allocating the map. Safe on zero Messages.
+func (m *Message) SetHeader(key string, value []byte) {
+	if m.Headers == nil {
+		m.Headers = make(Headers, 1)
+	}
+	m.Headers[key] = value
+}
+
 // TopicBatch represents messages for a specific topic
 type TopicBatch struct {
 	Topic    string
