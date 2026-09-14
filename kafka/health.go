@@ -3,39 +3,106 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// HealthChecker provides health check functionality for Kafka
+// HealthChecker provides health check functionality for Kafka.
+// It owns one long-lived connection (a librdkafka producer handle plus the
+// admin client derived from it) instead of dialing a fresh admin client per
+// check — and that one connection carries SSL/SASL via the connConfig seam.
 type HealthChecker struct {
-	client  *Producer
-	brokers []string
-	timeout time.Duration
+	producer     *ckafka.Producer
+	admin        *ckafka.AdminClient
+	brokers      []string
+	timeout      time.Duration
+	ownsProducer bool
 }
 
-// NewHealthChecker creates a new health checker
-func NewHealthChecker(client *Producer) *HealthChecker {
-	return &HealthChecker{
-		client:  client,
-		brokers: client.config.Brokers,
-		timeout: 10 * time.Second,
+// NewHealthChecker creates a health checker that owns its producer.
+func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
+	cfg := newDefaultProducerConfig()
+	for _, opt := range opts {
+		opt(cfg)
 	}
+	if len(cfg.Brokers) == 0 {
+		return nil, fmt.Errorf("brokers are required")
+	}
+	cfgMap := buildProducerConfig(cfg)
+	p, err := ckafka.NewProducer(&cfgMap)
+	if err != nil {
+		return nil, fmt.Errorf("create health producer: %w", err)
+	}
+	admin, err := ckafka.NewAdminClientFromProducer(p)
+	if err != nil {
+		p.Close()
+		return nil, fmt.Errorf("create health admin client: %w", err)
+	}
+	return &HealthChecker{
+		producer:     p,
+		admin:        admin,
+		brokers:      cfg.Brokers,
+		timeout:      10 * time.Second,
+		ownsProducer: true,
+	}, nil
 }
 
-// NewHealthCheckerWithBrokers creates a new health checker with brokers
-func NewHealthCheckerWithBrokers(brokers []string) *HealthChecker {
-	return &HealthChecker{
-		brokers: brokers,
-		timeout: 10 * time.Second,
+// NewHealthCheckerFromProducer derives a health checker from an existing
+// producer — no extra connections. Close() does NOT close the given producer.
+func NewHealthCheckerFromProducer(p *Producer) (*HealthChecker, error) {
+	admin, err := ckafka.NewAdminClientFromProducer(p.producer)
+	if err != nil {
+		return nil, fmt.Errorf("create health admin client: %w", err)
 	}
+	return &HealthChecker{
+		producer:     p.producer,
+		admin:        admin,
+		brokers:      p.config.Brokers,
+		timeout:      10 * time.Second,
+		ownsProducer: false,
+	}, nil
+}
+
+// Close releases the health checker's resources. It is a no-op for checkers
+// derived via NewHealthCheckerFromProducer.
+func (h *HealthChecker) Close() error {
+	if !h.ownsProducer {
+		return nil // derived — the producer belongs to the caller
+	}
+	h.admin.Close() // no-op for handles derived from a producer
+	h.producer.Close()
+	return nil
 }
 
 // SetTimeout sets the health check timeout
 func (h *HealthChecker) SetTimeout(timeout time.Duration) {
 	h.timeout = timeout
+}
+
+// deadlineTimeout clamps the health check timeout to the context deadline.
+func (h *HealthChecker) deadlineTimeout(ctx context.Context) time.Duration {
+	timeout := h.timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
+}
+
+// lagForPartition returns consumer lag for one partition: high watermark
+// minus committed offset. A negative committed offset means "nothing
+// committed yet" and a committed offset beyond the watermark means log
+// truncation — both report zero, not negative lag.
+func lagForPartition(high, committed int64) int64 {
+	if committed < 0 {
+		return 0
+	}
+	if l := high - committed; l > 0 {
+		return l
+	}
+	return 0
 }
 
 // Check performs a basic health check
@@ -45,46 +112,16 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	case <-ctx.Done():
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  ctx.Err(),
-			Details: map[string]any{
-				"error": ctx.Err().Error(),
-			},
+			Error:  ctx.Err().Error(),
 		}
 	default:
 	}
 
-	// Create an admin client for metadata
-	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(h.brokers, ","),
-	})
+	metadata, err := h.admin.GetMetadata(nil, true, int(h.deadlineTimeout(ctx).Milliseconds()))
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
-		}
-	}
-	defer adminClient.Close()
-
-	// Get metadata with timeout (use context deadline if available)
-	timeout := h.timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < timeout {
-			timeout = remaining
-		}
-	}
-
-	metadata, err := adminClient.GetMetadata(nil, true, int(timeout.Milliseconds()))
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
+			Error:  err.Error(),
 		}
 	}
 
@@ -92,10 +129,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	if len(metadata.Brokers) == 0 {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  fmt.Errorf("no brokers available"),
-			Details: map[string]any{
-				"error": "no brokers available",
-			},
+			Error:  "no brokers available",
 		}
 	}
 
@@ -116,45 +150,16 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 	case <-ctx.Done():
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  ctx.Err(),
-			Details: map[string]any{
-				"error": ctx.Err().Error(),
-			},
+			Error:  ctx.Err().Error(),
 		}
 	default:
 	}
 
-	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(h.brokers, ","),
-	})
+	metadata, err := h.admin.GetMetadata(nil, true, int(h.deadlineTimeout(ctx).Milliseconds()))
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
-		}
-	}
-	defer adminClient.Close()
-
-	// Get metadata with timeout
-	timeout := h.timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < timeout {
-			timeout = remaining
-		}
-	}
-
-	metadata, err := adminClient.GetMetadata(nil, true, int(timeout.Milliseconds()))
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
+			Error:  err.Error(),
 		}
 	}
 
@@ -183,37 +188,17 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	case <-ctx.Done():
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  ctx.Err(),
-			Details: map[string]any{
-				"error": ctx.Err().Error(),
-			},
+			Error:  ctx.Err().Error(),
 		}
 	default:
 	}
 
-	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(h.brokers, ","),
-	})
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
-		}
-	}
-	defer adminClient.Close()
-
 	// Get consumer group offsets
-	groups, err := adminClient.ListConsumerGroups(ctx)
+	groups, err := h.admin.ListConsumerGroups(ctx)
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
+			Error:  err.Error(),
 		}
 	}
 
@@ -229,32 +214,27 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	if !groupFound {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  fmt.Errorf("consumer group not found: %s", groupID),
+			Error:  fmt.Sprintf("consumer group not found: %s", groupID),
 			Details: map[string]any{
-				"error":   "consumer group not found",
 				"groupId": groupID,
 			},
 		}
 	}
 
 	// Describe consumer groups to get member information
-	describeResult, err := adminClient.DescribeConsumerGroups(ctx, []string{groupID})
+	describeResult, err := h.admin.DescribeConsumerGroups(ctx, []string{groupID})
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
+			Error:  err.Error(),
 		}
 	}
 
 	if len(describeResult.ConsumerGroupDescriptions) == 0 {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  fmt.Errorf("no group description found"),
+			Error:  "no group description found",
 			Details: map[string]any{
-				"error":   "no group description found",
 				"groupId": groupID,
 			},
 		}
@@ -263,36 +243,44 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	groupDesc := describeResult.ConsumerGroupDescriptions[0]
 
 	// Get committed offsets
-	offsetResult, err := adminClient.ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{
+	offsetResult, err := h.admin.ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{
 		{Group: groupID},
 	})
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
-			},
+			Error:  err.Error(),
 		}
 	}
 
-	// Calculate total lag
+	// Calculate total lag: per-partition high watermark minus committed offset
 	var totalLag int64
 	var lagDetails []map[string]any
-
 	for _, groupOffsets := range offsetResult.ConsumerGroupsTopicPartitions {
 		for _, tp := range groupOffsets.Partitions {
-			if tp.Offset < 0 {
+			if tp.Offset < 0 || tp.Topic == nil {
 				continue
 			}
-
-			// Get end offset for partition
-			// Note: This requires creating a consumer to get watermark offsets
-			// For simplicity, we'll just report the committed offset
+			_, high, err := h.producer.QueryWatermarkOffsets(*tp.Topic, tp.Partition, int(h.timeout.Milliseconds()))
+			if err != nil {
+				return &HealthResult{
+					Status: HealthStatusDown,
+					Error:  fmt.Sprintf("query watermark for %s[%d]: %v", *tp.Topic, tp.Partition, err),
+					Details: map[string]any{
+						"groupId":   groupID,
+						"topic":     *tp.Topic,
+						"partition": tp.Partition,
+					},
+				}
+			}
+			lag := lagForPartition(high, int64(tp.Offset))
+			totalLag += lag
 			lagDetails = append(lagDetails, map[string]any{
 				"topic":     *tp.Topic,
 				"partition": tp.Partition,
-				"offset":    int64(tp.Offset),
+				"committed": int64(tp.Offset),
+				"high":      high,
+				"lag":       lag,
 			})
 		}
 	}
@@ -323,44 +311,17 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 	case <-ctx.Done():
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  ctx.Err(),
-			Details: map[string]any{
-				"error": ctx.Err().Error(),
-			},
+			Error:  ctx.Err().Error(),
 		}
 	default:
 	}
 
-	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(h.brokers, ","),
-	})
+	metadata, err := h.admin.GetMetadata(&topic, false, int(h.deadlineTimeout(ctx).Milliseconds()))
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  err,
+			Error:  err.Error(),
 			Details: map[string]any{
-				"error": err.Error(),
-			},
-		}
-	}
-	defer adminClient.Close()
-
-	// Get metadata with timeout
-	timeout := h.timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining < timeout {
-			timeout = remaining
-		}
-	}
-
-	metadata, err := adminClient.GetMetadata(&topic, false, int(timeout.Milliseconds()))
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err,
-			Details: map[string]any{
-				"error": err.Error(),
 				"topic": topic,
 			},
 		}
@@ -370,9 +331,8 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 	if !ok {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  fmt.Errorf("topic not found: %s", topic),
+			Error:  fmt.Sprintf("topic not found: %s", topic),
 			Details: map[string]any{
-				"error": "topic not found",
 				"topic": topic,
 			},
 		}
@@ -381,9 +341,8 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 	if topicMeta.Error.Code() != ckafka.ErrNoError {
 		return &HealthResult{
 			Status: HealthStatusDown,
-			Error:  topicMeta.Error,
+			Error:  topicMeta.Error.String(),
 			Details: map[string]any{
-				"error": topicMeta.Error.String(),
 				"topic": topic,
 			},
 		}

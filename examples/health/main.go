@@ -11,8 +11,12 @@ import (
 )
 
 func main() {
-	// Create health checker with brokers
-	healthChecker := kafka.NewHealthCheckerWithBrokers([]string{"localhost:9092"})
+	// Create health checker (owns its producer connection)
+	healthChecker, err := kafka.NewHealthChecker(kafka.ProducerWithBrokers("localhost:9092"))
+	if err != nil {
+		log.Fatalf("Failed to create health checker: %v", err)
+	}
+	defer healthChecker.Close()
 
 	// Set custom timeout
 	healthChecker.SetTimeout(5 * time.Second)

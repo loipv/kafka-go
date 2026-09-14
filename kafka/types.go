@@ -88,7 +88,7 @@ const (
 type HealthResult struct {
 	Status  HealthStatus   `json:"status"`
 	Details map[string]any `json:"details,omitempty"`
-	Error   error          `json:"error,omitempty"`
+	Error   string         `json:"error,omitzero"`
 }
 
 // CircuitState represents circuit breaker states
