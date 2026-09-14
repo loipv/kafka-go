@@ -19,11 +19,9 @@ type Producer struct {
 	logger   Logger
 	closed   int32 // atomic: 0=open, 1=closed
 
-	// Queue for batched sending
-	queueMu     sync.Mutex
-	queue       map[string][]*Message
-	queueTicker *time.Ticker
-	queueDone   chan struct{}
+	done        chan struct{}
+	wg          sync.WaitGroup
+	deliveryErr func(*Message, error)
 }
 
 // NewProducer creates a new Kafka producer
@@ -52,11 +50,11 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	}
 
 	client := &Producer{
-		producer:  producer,
-		config:    config,
-		logger:    logger,
-		queue:     make(map[string][]*Message),
-		queueDone: make(chan struct{}),
+		producer:    producer,
+		config:      config,
+		logger:      logger,
+		done:        make(chan struct{}),
+		deliveryErr: config.DeliveryErrorHandler,
 	}
 
 	// Initialize tracing if enabled
@@ -65,11 +63,8 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	}
 
 	// Start delivery report handler
+	client.wg.Add(1)
 	go client.handleDeliveryReports()
-
-	// Start queue flusher
-	client.queueTicker = time.NewTicker(100 * time.Millisecond)
-	go client.flushQueue()
 
 	return client, nil
 }
@@ -124,7 +119,11 @@ func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Messag
 
 func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
 	if atomic.LoadInt32(&p.closed) == 1 {
-		return fmt.Errorf("producer is closed")
+		err := fmt.Errorf("producer is closed")
+		for _, m := range msgs {
+			endSpan(m, err) // spans were started in prepareMessage before this check
+		}
+		return err
 	}
 	deliveryChan := make(chan ckafka.Event, len(msgs))
 	var errs []error
@@ -152,6 +151,9 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 				endSpan(m, nil)
 			}
 		case <-ctx.Done():
+			for _, m := range msgs {
+				endSpan(m, ctx.Err()) // idempotent: already-reported messages skip
+			}
 			return errors.Join(append(errs, ctx.Err())...)
 		}
 	}
@@ -172,48 +174,38 @@ func topicOf(m *ckafka.Message) string {
 	return *m.TopicPartition.Topic
 }
 
-// ProduceAsync queues a message for automatic batching
-func (c *Producer) ProduceAsync(ctx context.Context, topic string, msg *Message) error {
-	if atomic.LoadInt32(&c.closed) == 1 {
-		return fmt.Errorf("client is closed")
+// ProduceAsync queues a message on librdkafka's internal queue and returns
+// immediately; librdkafka batches (linger.ms / batch.num.messages) and
+// back-pressures naturally when its queue is full. Delivery failures go to
+// the DeliveryErrorHandler.
+func (p *Producer) ProduceAsync(topic string, msg *Message) error {
+	if atomic.LoadInt32(&p.closed) == 1 {
+		return fmt.Errorf("producer is closed")
 	}
-
-	c.queueMu.Lock()
-	c.queue[topic] = append(c.queue[topic], msg)
-	c.queueMu.Unlock()
-
-	return nil
+	return p.producer.Produce(p.buildKafkaMessage(topic, msg), nil)
 }
 
 // Flush waits for all queued messages to be sent
-func (c *Producer) Flush(timeout time.Duration) error {
-	// First flush the queue
-	c.flushQueueNow()
-
-	// Then wait for producer to flush
-	remaining := c.producer.Flush(int(timeout.Milliseconds()))
+func (p *Producer) Flush(timeout time.Duration) error {
+	remaining := p.producer.Flush(int(timeout.Milliseconds()))
 	if remaining > 0 {
 		return fmt.Errorf("%d messages still in queue after flush", remaining)
 	}
 	return nil
 }
 
-// Close closes the client
-func (c *Producer) Close() error {
+// Close flushes outstanding messages and closes the producer. It waits for
+// the delivery-report reader to drain before closing the producer under it.
+func (p *Producer) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
-	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
+	if !atomic.CompareAndSwapInt32(&p.closed, 0, 1) {
 		return nil
 	}
 
-	// Stop queue flusher
-	close(c.queueDone)
-	c.queueTicker.Stop()
-
-	// Flush remaining messages
-	c.flushQueueNow()
-	c.producer.Flush(10000)
-
-	c.producer.Close()
+	close(p.done)
+	p.wg.Wait() // let the report reader drain before closing the producer under it (#30)
+	p.producer.Flush(10000)
+	p.producer.Close()
 	return nil
 }
 
@@ -248,65 +240,46 @@ func (c *Producer) buildKafkaMessage(topic string, msg *Message) *ckafka.Message
 }
 
 // handleDeliveryReports handles delivery reports from the producer
-func (c *Producer) handleDeliveryReports() {
+func (p *Producer) handleDeliveryReports() {
+	defer p.wg.Done()
 	for {
 		select {
-		case <-c.queueDone:
+		case <-p.done:
 			return
-		case e, ok := <-c.producer.Events():
+		case e, ok := <-p.producer.Events():
 			if !ok {
 				return
 			}
 			switch ev := e.(type) {
 			case *ckafka.Message:
 				if ev.TopicPartition.Error != nil {
-					c.logger.Error("Delivery failed: %v", ev.TopicPartition.Error)
+					endSpan(ev, ev.TopicPartition.Error)
+					p.reportDeliveryError(ev, ev.TopicPartition.Error)
+				} else {
+					endSpan(ev, nil)
 				}
 			case ckafka.Error:
-				c.logger.Error("Kafka error: %v", ev)
+				p.logger.Error("Kafka error: %v", ev) // slog form lands in Task 11
 			}
 		}
 	}
 }
 
-// flushQueue periodically flushes the queue
-func (c *Producer) flushQueue() {
-	for {
-		select {
-		case <-c.queueTicker.C:
-			c.flushQueueNow()
-		case <-c.queueDone:
-			return
-		}
+// reportDeliveryError routes an async delivery failure to the configured
+// DeliveryErrorHandler, or logs it when none is set.
+func (p *Producer) reportDeliveryError(ev *ckafka.Message, err error) {
+	msg := &Message{
+		Key:       ev.Key,
+		Value:     ev.Value,
+		Partition: ev.TopicPartition.Partition,
+		Offset:    int64(ev.TopicPartition.Offset),
+		Topic:     topicOf(ev),
 	}
-}
-
-// flushQueueNow immediately flushes all queued messages
-// Optimized to avoid allocation when queue is empty and pre-size new map
-func (c *Producer) flushQueueNow() {
-	c.queueMu.Lock()
-	// Fast path: nothing to flush
-	if len(c.queue) == 0 {
-		c.queueMu.Unlock()
+	if p.deliveryErr != nil {
+		p.deliveryErr(msg, err)
 		return
 	}
-	queue := c.queue
-	// Pre-size new map with previous capacity to reduce allocations
-	c.queue = make(map[string][]*Message, len(queue))
-	c.queueMu.Unlock()
-
-	for topic, msgs := range queue {
-		if len(msgs) == 0 {
-			continue
-		}
-		// Produce without waiting for delivery (fire and forget for queued messages)
-		for _, msg := range msgs {
-			kafkaMsg := c.buildKafkaMessage(topic, msg)
-			if err := c.producer.Produce(kafkaMsg, nil); err != nil {
-				c.logger.Error("Failed to produce queued message: %v", err)
-			}
-		}
-	}
+	p.logger.Error("Async delivery failed for topic %s: %v", msg.Topic, err) // slog form lands in Task 11
 }
 
 // Helper functions

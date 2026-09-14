@@ -24,11 +24,56 @@ func TestProduceDeliveryReportOK(t *testing.T) {
 	}
 }
 
+func TestProduceAsyncDeliveryErrorHandler(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+
+	errs := make(chan error, 4)
+	// message.timeout.ms is shortened so the delivery error fires within the
+	// waitFor deadline (librdkafka retries until this timeout; 5m default).
+	p, err := NewProducer(
+		ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithRawConfig(map[string]any{"message.timeout.ms": 5000}),
+		ProducerWithDeliveryErrorHandler(func(msg *Message, err error) { errs <- err }),
+	)
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+
+	if err := p.ProduceAsync(topic, &Message{Value: []byte("ok")}); err != nil {
+		t.Fatalf("ProduceAsync() = %v, want nil", err)
+	}
+	p.Flush(10 * time.Second)
+
+	// MockCluster broker ids start at 1 (not 0); newMockCluster creates one broker.
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	if err := p.ProduceAsync(topic, &Message{Value: []byte("bad")}); err != nil {
+		t.Fatalf("ProduceAsync() = %v, want nil (failure is async)", err)
+	}
+	waitFor(t, 30*time.Second, func() bool {
+		p.Flush(5 * time.Second)
+		return len(errs) > 0
+	}, "delivery error handler never fired for failed async produce")
+	if e := <-errs; e == nil {
+		t.Error("handler received nil error, want delivery failure")
+	}
+}
+
 func TestProduceBatchReportsFailureWhenBrokerDown(t *testing.T) {
 	skipIfShort(t)
 	mc := newMockCluster(t)
 	topic := uniqueTopic(t, mc, 1)
-	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	// Pin the delivery-ERROR branch: without the shorter message timeout,
+	// librdkafka would retry for the 5m default and the test would pass via
+	// the ctx-deadline branch instead.
+	p, err := NewProducer(
+		ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithRawConfig(map[string]any{"message.timeout.ms": 5000}),
+	)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}

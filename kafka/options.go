@@ -31,6 +31,10 @@ type ProducerConfig struct {
 	// Tracing
 	Tracing *TracingConfig
 
+	// DeliveryErrorHandler receives async delivery failures from
+	// ProduceAsync. Without one, failures are only logged.
+	DeliveryErrorHandler func(msg *Message, err error)
+
 	// Escape hatch
 	Raw map[string]any
 }
@@ -178,6 +182,12 @@ func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
 // does not model (e.g. "linger.ms", "queue.buffering.max.messages").
 func ProducerWithRawConfig(raw map[string]any) ProducerOption {
 	return func(c *ProducerConfig) { c.Raw = raw }
+}
+
+// ProducerWithDeliveryErrorHandler sets the sink for asynchronous delivery
+// failures (ProduceAsync / fire-and-forget produce).
+func ProducerWithDeliveryErrorHandler(h func(msg *Message, err error)) ProducerOption {
+	return func(c *ProducerConfig) { c.DeliveryErrorHandler = h }
 }
 
 // ==================== Default Configs ====================
