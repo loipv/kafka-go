@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: {go-version: "1.24", cache: true}
       - uses: golangci/golangci-lint-action@v6
-        with: {version: latest}
+        with: {version: v2.6.2}
   integration:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'integration')
     runs-on: ubuntu-latest
