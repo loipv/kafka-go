@@ -6,7 +6,6 @@
 //   - Handler-based consumer with auto-discovery and registration
 //   - Intelligent batch processing with configurable size and timeout
 //   - Key-based grouping within batches for ordered processing
-//   - Automatic back pressure management
 //   - In-memory idempotency with TTL
 //   - Dead Letter Queue (DLQ) with automatic retry and exponential backoff
 //   - OpenTelemetry distributed tracing

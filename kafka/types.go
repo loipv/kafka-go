@@ -2,7 +2,6 @@ package kafka
 
 import (
 	"context"
-	"sync"
 	"time"
 )
 
@@ -18,80 +17,6 @@ type Message struct {
 	Offset    int64
 	Timestamp time.Time
 	Topic     string
-}
-
-// MessagePool provides object pooling for Message structs to reduce GC pressure.
-// Use this for high-throughput scenarios where message allocation is a bottleneck.
-//
-// Usage:
-//
-//	pool := kafka.NewMessagePool()
-//	msg := pool.Get()
-//	// ... use msg ...
-//	pool.Put(msg)  // Return to pool when done
-//
-// IMPORTANT: Only put messages back that were obtained from the same pool.
-// Never put a message back if it's still referenced elsewhere.
-type MessagePool struct {
-	pool sync.Pool
-}
-
-// NewMessagePool creates a new message pool
-func NewMessagePool() *MessagePool {
-	return &MessagePool{
-		pool: sync.Pool{
-			New: func() any {
-				return &Message{}
-			},
-		},
-	}
-}
-
-// Get retrieves a Message from the pool or creates a new one
-func (p *MessagePool) Get() *Message {
-	return p.pool.Get().(*Message)
-}
-
-// Put returns a Message to the pool after resetting it
-// The message will be reset to zero values before being pooled
-func (p *MessagePool) Put(msg *Message) {
-	if msg == nil {
-		return
-	}
-	// Reset message to avoid data leaks
-	msg.Key = nil
-	msg.Value = nil
-	msg.Headers = nil
-	msg.Partition = 0
-	msg.Offset = 0
-	msg.Timestamp = time.Time{}
-	msg.Topic = ""
-	p.pool.Put(msg)
-}
-
-// GetWithHeaders retrieves a Message from the pool with pre-allocated headers map
-func (p *MessagePool) GetWithHeaders(headerCount int) *Message {
-	msg := p.pool.Get().(*Message)
-	if headerCount > 0 {
-		msg.Headers = make(Headers, headerCount)
-	}
-	return msg
-}
-
-// defaultMessagePool is a global pool for internal use
-var defaultMessagePool = NewMessagePool()
-
-// AcquireMessage gets a Message from the default pool
-// For high-throughput scenarios, prefer creating your own MessagePool
-func AcquireMessage() *Message {
-	return defaultMessagePool.Get()
-}
-
-// ReleaseMessage returns a Message to the default pool
-// IMPORTANT: Only call this if the message was obtained via AcquireMessage
-// and is no longer referenced anywhere
-func ReleaseMessage(msg *Message) {
-	defaultMessagePool.Put(msg)
 }
 
 // TopicMessages represents messages for a specific topic

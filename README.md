@@ -9,7 +9,6 @@ A production-ready Go library for Kafka client and consumer functionality built 
 - **Batch Processing**: Intelligent batching with configurable size and timeout
 - **Key-Based Grouping**: Group messages by key within batches for ordered processing
 - **Rebalance Callback**: Custom handling for partition assignment/revocation events
-- **Back Pressure**: Automatic pause/resume when consumers are overwhelmed
 - **Idempotency**: In-memory duplicate prevention with TTL
 - **Dead Letter Queue (DLQ)**: Automatic retry with exponential backoff
 - **Circuit Breaker**: Prevent DLQ flooding when downstream is unhealthy
@@ -244,10 +243,6 @@ consumer, err := kafka.NewConsumer(
     kafka.WithBatchTimeout(5*time.Second), // Max wait time
     kafka.WithGroupByKey(true),            // Group messages by key
 
-    // Optional - Pressure management
-    kafka.WithBackPressureThreshold(80),   // Pause at 80% capacity
-    kafka.WithMaxQueueSize(1000),
-
     // Optional - Idempotency
     kafka.WithIdempotencyKey(func(msg *kafka.Message) string {
         return string(msg.Headers["event-id"])
@@ -430,23 +425,6 @@ consumer, _ := kafka.NewConsumer(
 consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
     // Duplicate messages (same event-id) will be skipped automatically
     return processEvent(msg)
-})
-```
-
-### Consumer with Back Pressure
-
-```go
-consumer, _ := kafka.NewConsumer(
-    kafka.WithTopics("high-volume"),
-    kafka.WithBatchProcessing(true),
-    kafka.WithBackPressureThreshold(80), // Pause at 80% capacity
-    kafka.WithMaxQueueSize(1000),
-    // ... other options
-)
-
-consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
-    // Consumer will auto-pause when overwhelmed
-    return processHighVolume(msgs)
 })
 ```
 

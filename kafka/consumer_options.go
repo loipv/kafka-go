@@ -26,10 +26,6 @@ type ConsumerConfig struct {
 	BatchTimeout    time.Duration
 	GroupByKey      bool
 
-	// Pressure management
-	BackPressureThreshold int
-	MaxQueueSize          int
-
 	// Idempotency
 	IdempotencyKey IdempotencyKeyFunc
 	IdempotencyTTL time.Duration
@@ -95,12 +91,6 @@ type CircuitBreakerConfig struct {
 type ConsumerOption func(*ConsumerConfig)
 
 // ==================== Consumer Options ====================
-
-// WithConsumerBrokers sets the Kafka broker addresses for consumer
-// Deprecated: Use ConsumerWithBrokers instead for consistency
-func WithConsumerBrokers(brokers ...string) ConsumerOption {
-	return ConsumerWithBrokers(brokers...)
-}
 
 // ConsumerWithBrokers sets the Kafka broker addresses for consumer
 func ConsumerWithBrokers(brokers ...string) ConsumerOption {
@@ -183,20 +173,6 @@ func WithBatchTimeout(timeout time.Duration) ConsumerOption {
 func WithGroupByKey(enabled bool) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.GroupByKey = enabled
-	}
-}
-
-// WithBackPressureThreshold sets the back pressure threshold
-func WithBackPressureThreshold(threshold int) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.BackPressureThreshold = threshold
-	}
-}
-
-// WithMaxQueueSize sets the max queue size
-func WithMaxQueueSize(size int) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.MaxQueueSize = size
 	}
 }
 
@@ -283,23 +259,11 @@ func WithRebalanceCallback(callback RebalanceCallback) ConsumerOption {
 	}
 }
 
-// WithConsumerTracing sets tracing configuration for consumer
-// Deprecated: Use ConsumerWithTracing instead for consistency
-func WithConsumerTracing(tracing *TracingConfig) ConsumerOption {
-	return ConsumerWithTracing(tracing)
-}
-
 // ConsumerWithTracing sets tracing configuration for consumer
 func ConsumerWithTracing(tracing *TracingConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Tracing = tracing
 	}
-}
-
-// WithConsumerLogLevel sets the log level for consumer
-// Deprecated: Use ConsumerWithLogLevel instead for consistency
-func WithConsumerLogLevel(level LogLevel) ConsumerOption {
-	return ConsumerWithLogLevel(level)
 }
 
 // ConsumerWithLogLevel sets the log level for consumer
@@ -324,8 +288,6 @@ func newDefaultConsumerConfig() *ConsumerConfig {
 		RebalanceTimeout:      DefaultRebalanceTimeout,
 		BatchSize:             DefaultBatchSize,
 		BatchTimeout:          DefaultBatchTimeout,
-		BackPressureThreshold: DefaultBackPressureThreshold,
-		MaxQueueSize:          DefaultMaxQueueSize,
 		IdempotencyTTL:        DefaultIdempotencyTTL,
 		AutoCommit:            true,
 		AutoCommitInterval:    DefaultAutoCommitInterval,

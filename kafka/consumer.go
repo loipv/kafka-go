@@ -38,11 +38,6 @@ type KafkaConsumer struct {
 	batch      []*Message
 	batchTimer *time.Timer
 
-	// Back pressure - using atomic to avoid lock contention
-	queueSize    int64 // atomic
-	backPressure int32 // atomic: 0=normal, 1=pressured
-	bpThreshold  int64 // pre-calculated threshold
-
 	// Idempotency
 	idempotencyStore *IdempotencyStore
 
@@ -135,8 +130,6 @@ func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
 		batch:           make([]*Message, 0, config.BatchSize),
 		circuitBreakers: make(map[string]*CircuitBreaker),
 		dlqMetrics:      NewDLQMetricsCollector(),
-		// Pre-calculate back pressure threshold to avoid repeated calculation
-		bpThreshold: int64(config.MaxQueueSize * config.BackPressureThreshold / 100),
 	}
 
 	// Initialize tracing if enabled
@@ -232,9 +225,6 @@ func (c *KafkaConsumer) Start(ctx context.Context) error {
 
 			// Convert to our Message type
 			message := c.convertMessage(msg)
-
-			// Check back pressure
-			c.checkBackPressure()
 
 			// Process message
 			if c.config.BatchProcessing {
@@ -473,8 +463,6 @@ func (c *KafkaConsumer) addToBatch(ctx context.Context, msg *Message) {
 	batchSize := len(c.batch)
 	c.batchMu.Unlock()
 
-	atomic.AddInt64(&c.queueSize, 1)
-
 	// Process batch if full
 	if batchSize >= c.config.BatchSize {
 		c.processBatch(ctx)
@@ -503,8 +491,6 @@ func (c *KafkaConsumer) processBatch(ctx context.Context) {
 		c.batchTimer.Reset(c.config.BatchTimeout)
 	}
 	c.batchMu.Unlock()
-
-	atomic.StoreInt64(&c.queueSize, 0)
 
 	// Start tracing span
 	var endSpan func(error)
@@ -599,21 +585,6 @@ func (c *KafkaConsumer) batchTimeoutHandler(ctx context.Context) {
 		case <-timer.C:
 			c.processBatch(ctx)
 		}
-	}
-}
-
-// checkBackPressure checks and handles back pressure
-// Uses atomic CAS to avoid race conditions and lock contention
-func (c *KafkaConsumer) checkBackPressure() {
-	queueSize := atomic.LoadInt64(&c.queueSize)
-
-	// Use pre-calculated threshold (set in NewConsumer)
-	if queueSize >= c.bpThreshold && atomic.CompareAndSwapInt32(&c.backPressure, 0, 1) {
-		c.Pause()
-		c.logger.Warn("Back pressure threshold reached (%d/%d), pausing consumer", queueSize, c.bpThreshold)
-	} else if queueSize < c.bpThreshold/2 && atomic.CompareAndSwapInt32(&c.backPressure, 1, 0) {
-		c.Resume()
-		c.logger.Info("Back pressure relieved, resuming consumer")
 	}
 }
 

@@ -67,8 +67,6 @@ var (
 	DefaultRebalanceTimeout      = 60 * time.Second
 	DefaultBatchSize             = 100
 	DefaultBatchTimeout          = 5 * time.Second
-	DefaultBackPressureThreshold = 80
-	DefaultMaxQueueSize          = 1000
 	DefaultIdempotencyTTL        = 1 * time.Hour
 	DefaultAutoCommitInterval    = 5 * time.Second
 	DefaultDLQMaxRetries         = 3

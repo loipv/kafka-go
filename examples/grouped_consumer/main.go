@@ -34,10 +34,6 @@ func main() {
 		kafka.WithBatchTimeout(5*time.Second),
 		kafka.WithGroupByKey(true), // Enable key grouping
 
-		// Back pressure management
-		kafka.WithBackPressureThreshold(80), // Pause at 80% capacity
-		kafka.WithMaxQueueSize(1000),
-
 		// Use cooperative sticky assignor for better rebalancing
 		kafka.WithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
