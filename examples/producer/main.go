@@ -23,14 +23,14 @@ type Order struct {
 
 func main() {
 	// Create Kafka client with all common options
-	client, err := kafka.NewClient(
-		kafka.WithBrokers("localhost:9092"),
-		kafka.WithClientID("order-producer"),
-		kafka.WithAcks(kafka.AcksAll),
-		kafka.WithCompression(kafka.CompressionGZIP),
-		kafka.WithIdempotent(true),
+	client, err := kafka.NewProducer(
+		kafka.ProducerWithBrokers("localhost:9092"),
+		kafka.ProducerWithClientID("order-producer"),
+		kafka.ProducerWithAcks(kafka.AcksAll),
+		kafka.ProducerWithCompression(kafka.CompressionGZIP),
+		kafka.ProducerWithIdempotent(true),
 		kafka.WithLogLevel(kafka.LogLevelInfo),
-		kafka.WithTracing(&kafka.TracingConfig{
+		kafka.ProducerWithTracing(&kafka.TracingConfig{
 			Enabled:    true,
 			TracerName: "order-producer",
 		}),
@@ -51,7 +51,7 @@ func main() {
 		cancel()
 	}()
 
-	// Example 1: Send single messages
+	// Example 1: Produce single messages
 	log.Println("Sending single messages...")
 	for i := 0; i < 10; i++ {
 		select {
@@ -70,7 +70,7 @@ func main() {
 
 		data, _ := json.Marshal(order)
 
-		err := client.Send(ctx, "orders", &kafka.Message{
+		err := client.Produce(ctx, "orders", &kafka.Message{
 			Key:   []byte(order.CustomerID),
 			Value: data,
 			Headers: kafka.Headers{
@@ -88,7 +88,7 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Example 2: Send batch messages
+	// Example 2: Produce batch messages
 	log.Println("\nSending batch messages...")
 	batchOrders := make([]*kafka.Message, 5)
 	for i := 0; i < 5; i++ {
@@ -108,15 +108,15 @@ func main() {
 		}
 	}
 
-	if err := client.SendBatch(ctx, "orders", batchOrders); err != nil {
+	if err := client.ProduceBatch(ctx, "orders", batchOrders); err != nil {
 		log.Printf("Failed to send batch: %v", err)
 	} else {
 		log.Println("Batch sent successfully!")
 	}
 
-	// Example 3: Send to multiple topics
+	// Example 3: Produce to multiple topics
 	log.Println("\nSending to multiple topics...")
-	multiTopicBatch := []kafka.TopicMessages{
+	multiTopicBatch := []kafka.TopicBatch{
 		{
 			Topic: "orders",
 			Messages: []*kafka.Message{
@@ -131,7 +131,7 @@ func main() {
 		},
 	}
 
-	if err := client.SendMultiTopicBatch(ctx, multiTopicBatch); err != nil {
+	if err := client.ProduceMultiTopicBatch(ctx, multiTopicBatch); err != nil {
 		log.Printf("Failed to send multi-topic batch: %v", err)
 	} else {
 		log.Println("Multi-topic batch sent successfully!")

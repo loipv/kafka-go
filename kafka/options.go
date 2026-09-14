@@ -4,8 +4,8 @@ import (
 	"time"
 )
 
-// ClientConfig holds all client configuration
-type ClientConfig struct {
+// ProducerConfig holds all client configuration
+type ProducerConfig struct {
 	// Connection
 	Brokers           []string
 	ClientID          string
@@ -55,126 +55,126 @@ type TracingConfig struct {
 	TracerVersion string
 }
 
-// ClientOption is a function that configures the client
-type ClientOption func(*ClientConfig)
+// ProducerOption is a function that configures the client
+type ProducerOption func(*ProducerConfig)
 
 // Default values
 var (
-	DefaultConnectionTimeout     = 10 * time.Second
-	DefaultRequestTimeout        = 30 * time.Second
-	DefaultSessionTimeout        = 30 * time.Second
-	DefaultHeartbeatInterval     = 3 * time.Second
-	DefaultRebalanceTimeout      = 60 * time.Second
-	DefaultBatchSize             = 100
-	DefaultBatchTimeout          = 5 * time.Second
-	DefaultIdempotencyTTL        = 1 * time.Hour
-	DefaultAutoCommitInterval    = 5 * time.Second
-	DefaultDLQMaxRetries         = 3
-	DefaultDLQRetryDelay         = 1 * time.Second
-	DefaultDLQBackoffMultiplier  = 2.0
-	DefaultRetryMaxRetries       = 3
-	DefaultRetryInitialInterval  = 1 * time.Second
-	DefaultRetryMultiplier       = 2.0
+	DefaultConnectionTimeout    = 10 * time.Second
+	DefaultRequestTimeout       = 30 * time.Second
+	DefaultSessionTimeout       = 30 * time.Second
+	DefaultHeartbeatInterval    = 3 * time.Second
+	DefaultRebalanceTimeout     = 60 * time.Second
+	DefaultBatchSize            = 100
+	DefaultBatchTimeout         = 5 * time.Second
+	DefaultIdempotencyTTL       = 1 * time.Hour
+	DefaultAutoCommitInterval   = 5 * time.Second
+	DefaultDLQMaxRetries        = 3
+	DefaultDLQRetryDelay        = 1 * time.Second
+	DefaultDLQBackoffMultiplier = 2.0
+	DefaultRetryMaxRetries      = 3
+	DefaultRetryInitialInterval = 1 * time.Second
+	DefaultRetryMultiplier      = 2.0
 )
 
 // ==================== Client Options ====================
 
-// WithBrokers sets the Kafka broker addresses
-func WithBrokers(brokers ...string) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithBrokers sets the Kafka broker addresses
+func ProducerWithBrokers(brokers ...string) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Brokers = brokers
 	}
 }
 
-// WithClientID sets the client ID
-func WithClientID(clientID string) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithClientID sets the client ID
+func ProducerWithClientID(clientID string) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.ClientID = clientID
 	}
 }
 
-// WithConnectionTimeout sets the connection timeout
-func WithConnectionTimeout(timeout time.Duration) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithConnectionTimeout sets the connection timeout
+func ProducerWithConnectionTimeout(timeout time.Duration) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.ConnectionTimeout = timeout
 	}
 }
 
-// WithRequestTimeout sets the request timeout
-func WithRequestTimeout(timeout time.Duration) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithRequestTimeout sets the request timeout
+func ProducerWithRequestTimeout(timeout time.Duration) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.RequestTimeout = timeout
 	}
 }
 
-// WithSSL enables SSL
-func WithSSL(enabled bool) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithSSL enables SSL
+func ProducerWithSSL(enabled bool) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.SSL = enabled
 	}
 }
 
-// WithSASL sets SASL authentication
-func WithSASL(sasl *SASLConfig) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithSASL sets SASL authentication
+func ProducerWithSASL(sasl *SASLConfig) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.SASL = sasl
 	}
 }
 
-// WithAcks sets the acknowledgment level
-func WithAcks(acks Acks) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithAcks sets the acknowledgment level
+func ProducerWithAcks(acks Acks) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Acks = acks
 	}
 }
 
-// WithCompression sets the compression type
-func WithCompression(compression Compression) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithCompression sets the compression type
+func ProducerWithCompression(compression Compression) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Compression = compression
 	}
 }
 
-// WithIdempotent enables idempotent producer
-func WithIdempotent(enabled bool) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithIdempotent enables idempotent producer
+func ProducerWithIdempotent(enabled bool) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Idempotent = enabled
 	}
 }
 
-// WithRetry sets retry configuration
-func WithRetry(retry *RetryConfig) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithRetry sets retry configuration
+func ProducerWithRetry(retry *RetryConfig) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Retry = retry
 	}
 }
 
 // WithLogLevel sets the log level
-func WithLogLevel(level LogLevel) ClientOption {
-	return func(c *ClientConfig) {
+func WithLogLevel(level LogLevel) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.LogLevel = level
 	}
 }
 
-// WithLogger sets a custom logger
-func WithLogger(logger Logger) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithLogger sets a custom logger
+func ProducerWithLogger(logger Logger) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Logger = logger
 	}
 }
 
-// WithTracing sets tracing configuration
-func WithTracing(tracing *TracingConfig) ClientOption {
-	return func(c *ClientConfig) {
+// ProducerWithTracing sets tracing configuration
+func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
+	return func(c *ProducerConfig) {
 		c.Tracing = tracing
 	}
 }
 
 // ==================== Default Configs ====================
 
-// newDefaultClientConfig creates a new client config with default values
-func newDefaultClientConfig() *ClientConfig {
-	return &ClientConfig{
+// newDefaultProducerConfig creates a new producer config with default values
+func newDefaultProducerConfig() *ProducerConfig {
+	return &ProducerConfig{
 		ConnectionTimeout: DefaultConnectionTimeout,
 		RequestTimeout:    DefaultRequestTimeout,
 		Acks:              AcksAll,

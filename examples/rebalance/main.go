@@ -80,20 +80,20 @@ func main() {
 	// Create Kafka consumer with rebalance callback
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers("localhost:9092"),
-		kafka.WithGroupID("rebalance-aware-consumer"),
-		kafka.WithTopics("orders"),
+		kafka.ConsumerWithGroupID("rebalance-aware-consumer"),
+		kafka.ConsumerWithTopics("orders"),
 
 		// Disable auto-commit for manual offset control
-		kafka.WithAutoCommit(false),
+		kafka.ConsumerWithAutoCommit(false),
 
 		// Use cooperative sticky for smoother rebalancing
-		kafka.WithPartitionAssignor(kafka.AssignorCooperativeSticky),
+		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
 		// Logging
 		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
 
 		// Rebalance callback for partition management
-		kafka.WithRebalanceCallback(func(event kafka.RebalanceEvent) error {
+		kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {
 			switch event.Type {
 			case "assigned":
 				log.Println("=== PARTITIONS ASSIGNED ===")
@@ -134,7 +134,7 @@ func main() {
 	}
 
 	// Register message handler
-	consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+	consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
 		// Get partition state
 		state := partitionManager.GetOrCreate(msg.Topic, msg.Partition)
 

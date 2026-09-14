@@ -9,15 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// Verify KafkaConsumer implements Consumer interface
-var _ Consumer = (*KafkaConsumer)(nil)
-
-// KafkaConsumer implements the Consumer interface
-type KafkaConsumer struct {
-	consumer *kafka.Consumer
+// Consumer is a handler-based Kafka consumer.
+type Consumer struct {
+	consumer *ckafka.Consumer
 	config   *ConsumerConfig
 	tracer   *TracingService
 	logger   Logger
@@ -51,7 +48,7 @@ type KafkaConsumer struct {
 }
 
 // NewConsumer creates a new Kafka consumer
-func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
+func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	config := newDefaultConsumerConfig()
 	for _, opt := range opts {
 		opt(config)
@@ -70,7 +67,7 @@ func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
 	}
 
 	// Build kafka config map
-	configMap := &kafka.ConfigMap{
+	configMap := &ckafka.ConfigMap{
 		"bootstrap.servers":  strings.Join(config.Brokers, ","),
 		"group.id":           config.GroupID,
 		"auto.offset.reset":  getOffsetReset(config.FromBeginning),
@@ -112,7 +109,7 @@ func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
 	// Set log level
 	configMap.SetKey("log_level", int(config.LogLevel))
 
-	consumer, err := kafka.NewConsumer(configMap)
+	consumer, err := ckafka.NewConsumer(configMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consumer: %w", err)
 	}
@@ -123,7 +120,7 @@ func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
 		logger = NewDefaultLogger(config.LogLevel)
 	}
 
-	kc := &KafkaConsumer{
+	kc := &Consumer{
 		consumer:        consumer,
 		config:          config,
 		logger:          logger,
@@ -159,23 +156,23 @@ func NewConsumer(opts ...ConsumerOption) (*KafkaConsumer, error) {
 	return kc, nil
 }
 
-// Handle registers a handler for single messages
-func (c *KafkaConsumer) Handle(handler MessageHandler) {
+// OnMessage registers a handler for single messages
+func (c *Consumer) OnMessage(handler MessageHandler) {
 	c.messageHandler = handler
 }
 
-// HandleBatch registers a handler for batch messages
-func (c *KafkaConsumer) HandleBatch(handler BatchHandler) {
+// OnBatch registers a handler for batch messages
+func (c *Consumer) OnBatch(handler BatchHandler) {
 	c.batchHandler = handler
 }
 
-// HandleGroupedBatch registers a handler for key-grouped batches
-func (c *KafkaConsumer) HandleGroupedBatch(handler GroupedBatchHandler) {
+// OnGroupedBatch registers a handler for key-grouped batches
+func (c *Consumer) OnGroupedBatch(handler GroupedBatchHandler) {
 	c.groupedBatchHandler = handler
 }
 
 // Start starts consuming messages (blocking)
-func (c *KafkaConsumer) Start(ctx context.Context) error {
+func (c *Consumer) Start(ctx context.Context) error {
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
 		return fmt.Errorf("consumer is already running")
@@ -215,7 +212,7 @@ func (c *KafkaConsumer) Start(ctx context.Context) error {
 			msg, err := c.consumer.ReadMessage(100 * time.Millisecond)
 			if err != nil {
 				// Timeout is normal, continue
-				if kafkaErr, ok := err.(kafka.Error); ok && kafkaErr.Code() == kafka.ErrTimedOut {
+				if kafkaErr, ok := err.(ckafka.Error); ok && kafkaErr.Code() == ckafka.ErrTimedOut {
 					continue
 				}
 				// Log other errors but continue
@@ -237,7 +234,7 @@ func (c *KafkaConsumer) Start(ctx context.Context) error {
 }
 
 // Close closes the consumer
-func (c *KafkaConsumer) Close(ctx context.Context) error {
+func (c *Consumer) Close(ctx context.Context) error {
 	// Use atomic CAS to ensure only one Close can succeed
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
 		return nil
@@ -270,22 +267,22 @@ func (c *KafkaConsumer) Close(ctx context.Context) error {
 }
 
 // Pause pauses consumption
-func (c *KafkaConsumer) Pause() {
+func (c *Consumer) Pause() {
 	atomic.StoreInt32(&c.paused, 1)
 }
 
 // Resume resumes consumption
-func (c *KafkaConsumer) Resume() {
+func (c *Consumer) Resume() {
 	atomic.StoreInt32(&c.paused, 0)
 }
 
-// GetDLQMetrics returns DLQ metrics
-func (c *KafkaConsumer) GetDLQMetrics() *DLQMetrics {
+// DLQMetrics returns DLQ metrics
+func (c *Consumer) DLQMetrics() *DLQMetrics {
 	return c.dlqMetrics.GetMetrics()
 }
 
-// GetCircuitState returns circuit breaker state
-func (c *KafkaConsumer) GetCircuitState(dlqTopic string) CircuitState {
+// CircuitState returns circuit breaker state
+func (c *Consumer) CircuitState(dlqTopic string) CircuitState {
 	c.cbMu.RLock()
 	defer c.cbMu.RUnlock()
 	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
@@ -295,7 +292,7 @@ func (c *KafkaConsumer) GetCircuitState(dlqTopic string) CircuitState {
 }
 
 // ResetCircuit resets the circuit breaker
-func (c *KafkaConsumer) ResetCircuit(dlqTopic string) {
+func (c *Consumer) ResetCircuit(dlqTopic string) {
 	c.cbMu.Lock()
 	defer c.cbMu.Unlock()
 	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
@@ -303,9 +300,9 @@ func (c *KafkaConsumer) ResetCircuit(dlqTopic string) {
 	}
 }
 
-// convertMessage converts kafka.Message to Message
+// convertMessage converts ckafka.Message to Message
 // Optimized to avoid allocation when there are no headers
-func (c *KafkaConsumer) convertMessage(msg *kafka.Message) *Message {
+func (c *Consumer) convertMessage(msg *ckafka.Message) *Message {
 	var headers Headers
 	if len(msg.Headers) > 0 {
 		headers = make(Headers, len(msg.Headers)) // Pre-sized allocation
@@ -326,7 +323,7 @@ func (c *KafkaConsumer) convertMessage(msg *kafka.Message) *Message {
 }
 
 // processMessage processes a single message
-func (c *KafkaConsumer) processMessage(ctx context.Context, msg *Message) {
+func (c *Consumer) processMessage(ctx context.Context, msg *Message) {
 	// Check idempotency BEFORE processing
 	var idempotencyKey string
 	if c.idempotencyStore != nil && c.config.IdempotencyKey != nil {
@@ -346,7 +343,7 @@ func (c *KafkaConsumer) processMessage(ctx context.Context, msg *Message) {
 	// Execute handler with retry
 	err := c.executeWithRetry(ctx, msg)
 
-	// Handle result
+	// OnMessage result
 	if err != nil {
 		if endSpan != nil {
 			endSpan(err)
@@ -368,7 +365,7 @@ func (c *KafkaConsumer) processMessage(ctx context.Context, msg *Message) {
 }
 
 // executeWithRetry executes the handler with retry logic
-func (c *KafkaConsumer) executeWithRetry(ctx context.Context, msg *Message) error {
+func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) error {
 	if c.messageHandler == nil {
 		return nil
 	}
@@ -423,13 +420,13 @@ func (c *KafkaConsumer) executeWithRetry(ctx context.Context, msg *Message) erro
 }
 
 // handleError handles processing errors
-func (c *KafkaConsumer) handleError(ctx context.Context, err error, msg *Message) {
+func (c *Consumer) handleError(ctx context.Context, err error, msg *Message) {
 	// Call error handler if set
 	if c.config.ErrorHandler != nil {
 		c.config.ErrorHandler(err, msg)
 	}
 
-	// Send to DLQ if configured
+	// Produce to DLQ if configured
 	if c.dlqService != nil {
 		// Check circuit breaker
 		c.cbMu.RLock()
@@ -441,7 +438,7 @@ func (c *KafkaConsumer) handleError(ctx context.Context, err error, msg *Message
 			return
 		}
 
-		dlqErr := c.dlqService.SendToDLQ(ctx, msg, err)
+		dlqErr := c.dlqService.produceToDLQ(ctx, msg, err)
 		if dlqErr != nil {
 			c.logger.Error("Failed to send to DLQ: %v", dlqErr)
 			if cb != nil {
@@ -457,7 +454,7 @@ func (c *KafkaConsumer) handleError(ctx context.Context, err error, msg *Message
 }
 
 // addToBatch adds a message to the batch
-func (c *KafkaConsumer) addToBatch(ctx context.Context, msg *Message) {
+func (c *Consumer) addToBatch(ctx context.Context, msg *Message) {
 	c.batchMu.Lock()
 	c.batch = append(c.batch, msg)
 	batchSize := len(c.batch)
@@ -470,7 +467,7 @@ func (c *KafkaConsumer) addToBatch(ctx context.Context, msg *Message) {
 }
 
 // processBatch processes the current batch
-func (c *KafkaConsumer) processBatch(ctx context.Context) {
+func (c *Consumer) processBatch(ctx context.Context) {
 	c.batchMu.Lock()
 	if len(c.batch) == 0 {
 		c.batchMu.Unlock()
@@ -517,7 +514,7 @@ func (c *KafkaConsumer) processBatch(ctx context.Context) {
 		endSpan(processingErr)
 	}
 
-	// Handle batch error
+	// OnMessage batch error
 	if processingErr != nil {
 		c.handleBatchError(ctx, processingErr, batch)
 	}
@@ -525,7 +522,7 @@ func (c *KafkaConsumer) processBatch(ctx context.Context) {
 
 // groupByKey groups messages by key
 // Optimized with pre-allocation based on estimated group count
-func (c *KafkaConsumer) groupByKey(msgs []*Message) []GroupedBatch {
+func (c *Consumer) groupByKey(msgs []*Message) []GroupedBatch {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -562,14 +559,14 @@ func (c *KafkaConsumer) groupByKey(msgs []*Message) []GroupedBatch {
 }
 
 // handleBatchError handles batch processing errors
-func (c *KafkaConsumer) handleBatchError(ctx context.Context, err error, batch []*Message) {
+func (c *Consumer) handleBatchError(ctx context.Context, err error, batch []*Message) {
 	for _, msg := range batch {
 		c.handleError(ctx, err, msg)
 	}
 }
 
 // batchTimeoutHandler handles batch timeout
-func (c *KafkaConsumer) batchTimeoutHandler(ctx context.Context) {
+func (c *Consumer) batchTimeoutHandler(ctx context.Context) {
 	for {
 		c.batchMu.Lock()
 		timer := c.batchTimer
@@ -589,7 +586,7 @@ func (c *KafkaConsumer) batchTimeoutHandler(ctx context.Context) {
 }
 
 // startDLQRetryConsumer starts the DLQ retry consumer
-func (c *KafkaConsumer) startDLQRetryConsumer(ctx context.Context) {
+func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 	if c.dlqService == nil || c.config.DLQRetry == nil {
 		return
 	}
@@ -603,14 +600,14 @@ func (c *KafkaConsumer) startDLQRetryConsumer(ctx context.Context) {
 		groupID = fmt.Sprintf("%s-retry-consumer", dlqTopic)
 	}
 
-	configMap := &kafka.ConfigMap{
+	configMap := &ckafka.ConfigMap{
 		"bootstrap.servers":  strings.Join(c.config.Brokers, ","),
 		"group.id":           groupID,
 		"auto.offset.reset":  getOffsetReset(retryConfig.FromBeginning),
 		"enable.auto.commit": true,
 	}
 
-	dlqConsumer, err := kafka.NewConsumer(configMap)
+	dlqConsumer, err := ckafka.NewConsumer(configMap)
 	if err != nil {
 		c.logger.Error("Failed to create DLQ retry consumer: %v", err)
 		return
@@ -631,7 +628,7 @@ func (c *KafkaConsumer) startDLQRetryConsumer(ctx context.Context) {
 		default:
 			msg, err := dlqConsumer.ReadMessage(100 * time.Millisecond)
 			if err != nil {
-				if kafkaErr, ok := err.(kafka.Error); ok && kafkaErr.Code() == kafka.ErrTimedOut {
+				if kafkaErr, ok := err.(ckafka.Error); ok && kafkaErr.Code() == ckafka.ErrTimedOut {
 					continue
 				}
 				c.logger.Warn("DLQ consumer error: %v", err)
@@ -646,7 +643,7 @@ func (c *KafkaConsumer) startDLQRetryConsumer(ctx context.Context) {
 }
 
 // processDLQRetry processes a DLQ retry message
-func (c *KafkaConsumer) processDLQRetry(ctx context.Context, msg *Message, config *DLQRetryConfig) {
+func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DLQRetryConfig) {
 	c.dlqMetrics.IncrementReprocessAttempts(msg.Topic)
 
 	// Get retry count from headers - use strconv for better performance
@@ -696,26 +693,26 @@ func (c *KafkaConsumer) processDLQRetry(ctx context.Context, msg *Message, confi
 }
 
 // sendToFinalDLQ sends message to final DLQ
-func (c *KafkaConsumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic string) {
+func (c *Consumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic string) {
 	msg.Headers["x-final-dlq-reason"] = []byte("max retries exceeded")
 	msg.Headers["x-final-dlq-timestamp"] = appendTime(nil, time.Now())
 
 	if c.dlqService != nil {
-		if err := c.dlqService.SendToTopic(ctx, finalTopic, msg); err != nil {
+		if err := c.dlqService.produceToTopic(ctx, finalTopic, msg); err != nil {
 			c.logger.Error("Failed to send to final DLQ: %v", err)
 		}
 	}
 }
 
-// createRebalanceCallback creates a kafka.RebalanceCb from the user's RebalanceCallback
-func (c *KafkaConsumer) createRebalanceCallback() kafka.RebalanceCb {
+// createRebalanceCallback creates a ckafka.RebalanceCb from the user's RebalanceCallback
+func (c *Consumer) createRebalanceCallback() ckafka.RebalanceCb {
 	if c.config.RebalanceCallback == nil {
 		return nil
 	}
 
-	return func(consumer *kafka.Consumer, event kafka.Event) error {
+	return func(consumer *ckafka.Consumer, event ckafka.Event) error {
 		switch e := event.(type) {
-		case kafka.AssignedPartitions:
+		case ckafka.AssignedPartitions:
 			c.logger.Info("Partitions assigned: %v", e.Partitions)
 
 			// Convert to our TopicPartition type
@@ -740,7 +737,7 @@ func (c *KafkaConsumer) createRebalanceCallback() kafka.RebalanceCb {
 			// Assign partitions to consumer
 			return consumer.Assign(e.Partitions)
 
-		case kafka.RevokedPartitions:
+		case ckafka.RevokedPartitions:
 			c.logger.Info("Partitions revoked: %v", e.Partitions)
 
 			// Convert to our TopicPartition type
@@ -766,7 +763,7 @@ func (c *KafkaConsumer) createRebalanceCallback() kafka.RebalanceCb {
 			if !c.config.AutoCommit {
 				if _, err := consumer.Commit(); err != nil {
 					// Ignore "no offset stored" errors
-					if kafkaErr, ok := err.(kafka.Error); !ok || kafkaErr.Code() != kafka.ErrNoOffset {
+					if kafkaErr, ok := err.(ckafka.Error); !ok || kafkaErr.Code() != ckafka.ErrNoOffset {
 						c.logger.Warn("Failed to commit offsets during rebalance: %v", err)
 					}
 				}

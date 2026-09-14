@@ -6,18 +6,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 // HealthChecker provides health check functionality for Kafka
 type HealthChecker struct {
-	client  *KafkaClient
+	client  *Producer
 	brokers []string
 	timeout time.Duration
 }
 
 // NewHealthChecker creates a new health checker
-func NewHealthChecker(client *KafkaClient) *HealthChecker {
+func NewHealthChecker(client *Producer) *HealthChecker {
 	return &HealthChecker{
 		client:  client,
 		brokers: client.config.Brokers,
@@ -54,7 +54,7 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	}
 
 	// Create an admin client for metadata
-	adminClient, err := kafka.NewAdminClient(&kafka.ConfigMap{
+	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(h.brokers, ","),
 	})
 	if err != nil {
@@ -124,7 +124,7 @@ func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
 	default:
 	}
 
-	adminClient, err := kafka.NewAdminClient(&kafka.ConfigMap{
+	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(h.brokers, ","),
 	})
 	if err != nil {
@@ -191,7 +191,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	default:
 	}
 
-	adminClient, err := kafka.NewAdminClient(&kafka.ConfigMap{
+	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(h.brokers, ","),
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	groupDesc := describeResult.ConsumerGroupDescriptions[0]
 
 	// Get committed offsets
-	offsetResult, err := adminClient.ListConsumerGroupOffsets(ctx, []kafka.ConsumerGroupTopicPartitions{
+	offsetResult, err := adminClient.ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{
 		{Group: groupID},
 	})
 	if err != nil {
@@ -331,7 +331,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 	default:
 	}
 
-	adminClient, err := kafka.NewAdminClient(&kafka.ConfigMap{
+	adminClient, err := ckafka.NewAdminClient(&ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(h.brokers, ","),
 	})
 	if err != nil {
@@ -378,7 +378,7 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 		}
 	}
 
-	if topicMeta.Error.Code() != kafka.ErrNoError {
+	if topicMeta.Error.Code() != ckafka.ErrNoError {
 		return &HealthResult{
 			Status: HealthStatusDown,
 			Error:  topicMeta.Error,

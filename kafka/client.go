@@ -8,16 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// Verify KafkaClient implements Client interface
-var _ Client = (*KafkaClient)(nil)
-
-// KafkaClient implements the Client interface
-type KafkaClient struct {
-	producer *kafka.Producer
-	config   *ClientConfig
+// Producer is a high-performance Kafka producer.
+type Producer struct {
+	producer *ckafka.Producer
+	config   *ProducerConfig
 	tracer   *TracingService
 	logger   Logger
 	closed   int32 // atomic: 0=open, 1=closed
@@ -29,9 +26,9 @@ type KafkaClient struct {
 	queueDone   chan struct{}
 }
 
-// NewClient creates a new Kafka client
-func NewClient(opts ...ClientOption) (*KafkaClient, error) {
-	config := newDefaultClientConfig()
+// NewProducer creates a new Kafka producer
+func NewProducer(opts ...ProducerOption) (*Producer, error) {
+	config := newDefaultProducerConfig()
 	for _, opt := range opts {
 		opt(config)
 	}
@@ -41,7 +38,7 @@ func NewClient(opts ...ClientOption) (*KafkaClient, error) {
 	}
 
 	// Build kafka config map
-	configMap := &kafka.ConfigMap{
+	configMap := &ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(config.Brokers, ","),
 		"acks":              int(config.Acks),
 	}
@@ -84,7 +81,7 @@ func NewClient(opts ...ClientOption) (*KafkaClient, error) {
 	// Set log level
 	configMap.SetKey("log_level", int(config.LogLevel))
 
-	producer, err := kafka.NewProducer(configMap)
+	producer, err := ckafka.NewProducer(configMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create producer: %w", err)
 	}
@@ -95,7 +92,7 @@ func NewClient(opts ...ClientOption) (*KafkaClient, error) {
 		logger = NewDefaultLogger(config.LogLevel)
 	}
 
-	client := &KafkaClient{
+	client := &Producer{
 		producer:  producer,
 		config:    config,
 		logger:    logger,
@@ -118,8 +115,8 @@ func NewClient(opts ...ClientOption) (*KafkaClient, error) {
 	return client, nil
 }
 
-// Send sends a single message to a topic
-func (c *KafkaClient) Send(ctx context.Context, topic string, msg *Message) error {
+// Produce sends a single message to a topic
+func (c *Producer) Produce(ctx context.Context, topic string, msg *Message) error {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return fmt.Errorf("client is closed")
 	}
@@ -133,7 +130,7 @@ func (c *KafkaClient) Send(ctx context.Context, topic string, msg *Message) erro
 		c.tracer.InjectTraceContext(ctx, kafkaMsg)
 	}
 
-	deliveryChan := make(chan kafka.Event, 1)
+	deliveryChan := make(chan ckafka.Event, 1)
 	err := c.producer.Produce(kafkaMsg, deliveryChan)
 	if err != nil {
 		if endSpan != nil {
@@ -145,7 +142,7 @@ func (c *KafkaClient) Send(ctx context.Context, topic string, msg *Message) erro
 	// Wait for delivery report
 	select {
 	case e := <-deliveryChan:
-		m := e.(*kafka.Message)
+		m := e.(*ckafka.Message)
 		if m.TopicPartition.Error != nil {
 			if endSpan != nil {
 				endSpan(m.TopicPartition.Error)
@@ -164,8 +161,8 @@ func (c *KafkaClient) Send(ctx context.Context, topic string, msg *Message) erro
 	}
 }
 
-// SendBatch sends multiple messages to a single topic
-func (c *KafkaClient) SendBatch(ctx context.Context, topic string, msgs []*Message) error {
+// ProduceBatch sends multiple messages to a single topic
+func (c *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return fmt.Errorf("client is closed")
 	}
@@ -175,7 +172,7 @@ func (c *KafkaClient) SendBatch(ctx context.Context, topic string, msgs []*Messa
 	}
 
 	type messageWithSpan struct {
-		kafkaMsg *kafka.Message
+		kafkaMsg *ckafka.Message
 		endSpan  func(error)
 	}
 
@@ -199,7 +196,7 @@ func (c *KafkaClient) SendBatch(ctx context.Context, topic string, msgs []*Messa
 	}
 
 	// Create delivery channel for all messages
-	deliveryChan := make(chan kafka.Event, len(msgs))
+	deliveryChan := make(chan ckafka.Event, len(msgs))
 	producedCount := 0
 
 	for _, mws := range msgsWithSpans {
@@ -219,7 +216,7 @@ func (c *KafkaClient) SendBatch(ctx context.Context, topic string, msgs []*Messa
 	for i := 0; i < producedCount; i++ {
 		select {
 		case e := <-deliveryChan:
-			m := e.(*kafka.Message)
+			m := e.(*ckafka.Message)
 			if m.TopicPartition.Error != nil {
 				deliveryErrors[i] = m.TopicPartition.Error
 			}
@@ -262,8 +259,8 @@ func (c *KafkaClient) SendBatch(ctx context.Context, topic string, msgs []*Messa
 	return nil
 }
 
-// SendMultiTopicBatch sends messages to multiple topics
-func (c *KafkaClient) SendMultiTopicBatch(ctx context.Context, batches []TopicMessages) error {
+// ProduceMultiTopicBatch sends messages to multiple topics
+func (c *Producer) ProduceMultiTopicBatch(ctx context.Context, batches []TopicBatch) error {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return fmt.Errorf("client is closed")
 	}
@@ -278,7 +275,7 @@ func (c *KafkaClient) SendMultiTopicBatch(ctx context.Context, batches []TopicMe
 	}
 
 	type messageWithSpan struct {
-		kafkaMsg *kafka.Message
+		kafkaMsg *ckafka.Message
 		endSpan  func(error)
 	}
 
@@ -304,7 +301,7 @@ func (c *KafkaClient) SendMultiTopicBatch(ctx context.Context, batches []TopicMe
 	}
 
 	// Create delivery channel
-	deliveryChan := make(chan kafka.Event, totalMsgs)
+	deliveryChan := make(chan ckafka.Event, totalMsgs)
 	producedCount := 0
 
 	for _, mws := range msgsWithSpans {
@@ -324,7 +321,7 @@ func (c *KafkaClient) SendMultiTopicBatch(ctx context.Context, batches []TopicMe
 	for i := 0; i < producedCount; i++ {
 		select {
 		case e := <-deliveryChan:
-			m := e.(*kafka.Message)
+			m := e.(*ckafka.Message)
 			if m.TopicPartition.Error != nil {
 				deliveryErrors[i] = m.TopicPartition.Error
 			}
@@ -362,8 +359,8 @@ func (c *KafkaClient) SendMultiTopicBatch(ctx context.Context, batches []TopicMe
 	return nil
 }
 
-// SendQueued queues a message for automatic batching
-func (c *KafkaClient) SendQueued(ctx context.Context, topic string, msg *Message) error {
+// ProduceAsync queues a message for automatic batching
+func (c *Producer) ProduceAsync(ctx context.Context, topic string, msg *Message) error {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return fmt.Errorf("client is closed")
 	}
@@ -376,7 +373,7 @@ func (c *KafkaClient) SendQueued(ctx context.Context, topic string, msg *Message
 }
 
 // Flush waits for all queued messages to be sent
-func (c *KafkaClient) Flush(timeout time.Duration) error {
+func (c *Producer) Flush(timeout time.Duration) error {
 	// First flush the queue
 	c.flushQueueNow()
 
@@ -389,7 +386,7 @@ func (c *KafkaClient) Flush(timeout time.Duration) error {
 }
 
 // Close closes the client
-func (c *KafkaClient) Close() error {
+func (c *Producer) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
 		return nil
@@ -407,12 +404,12 @@ func (c *KafkaClient) Close() error {
 	return nil
 }
 
-// buildKafkaMessage builds a kafka.Message from Message
-func (c *KafkaClient) buildKafkaMessage(topic string, msg *Message) *kafka.Message {
-	kafkaMsg := &kafka.Message{
-		TopicPartition: kafka.TopicPartition{
+// buildKafkaMessage builds a ckafka.Message from Message
+func (c *Producer) buildKafkaMessage(topic string, msg *Message) *ckafka.Message {
+	kafkaMsg := &ckafka.Message{
+		TopicPartition: ckafka.TopicPartition{
 			Topic:     &topic,
-			Partition: kafka.PartitionAny,
+			Partition: ckafka.PartitionAny,
 		},
 		Value: msg.Value,
 	}
@@ -431,7 +428,7 @@ func (c *KafkaClient) buildKafkaMessage(topic string, msg *Message) *kafka.Messa
 
 	if msg.Headers != nil {
 		for k, v := range msg.Headers {
-			kafkaMsg.Headers = append(kafkaMsg.Headers, kafka.Header{
+			kafkaMsg.Headers = append(kafkaMsg.Headers, ckafka.Header{
 				Key:   k,
 				Value: v,
 			})
@@ -442,7 +439,7 @@ func (c *KafkaClient) buildKafkaMessage(topic string, msg *Message) *kafka.Messa
 }
 
 // handleDeliveryReports handles delivery reports from the producer
-func (c *KafkaClient) handleDeliveryReports() {
+func (c *Producer) handleDeliveryReports() {
 	for {
 		select {
 		case <-c.queueDone:
@@ -452,11 +449,11 @@ func (c *KafkaClient) handleDeliveryReports() {
 				return
 			}
 			switch ev := e.(type) {
-			case *kafka.Message:
+			case *ckafka.Message:
 				if ev.TopicPartition.Error != nil {
 					c.logger.Error("Delivery failed: %v", ev.TopicPartition.Error)
 				}
-			case kafka.Error:
+			case ckafka.Error:
 				c.logger.Error("Kafka error: %v", ev)
 			}
 		}
@@ -464,7 +461,7 @@ func (c *KafkaClient) handleDeliveryReports() {
 }
 
 // flushQueue periodically flushes the queue
-func (c *KafkaClient) flushQueue() {
+func (c *Producer) flushQueue() {
 	for {
 		select {
 		case <-c.queueTicker.C:
@@ -477,7 +474,7 @@ func (c *KafkaClient) flushQueue() {
 
 // flushQueueNow immediately flushes all queued messages
 // Optimized to avoid allocation when queue is empty and pre-size new map
-func (c *KafkaClient) flushQueueNow() {
+func (c *Producer) flushQueueNow() {
 	c.queueMu.Lock()
 	// Fast path: nothing to flush
 	if len(c.queue) == 0 {
@@ -493,7 +490,7 @@ func (c *KafkaClient) flushQueueNow() {
 		if len(msgs) == 0 {
 			continue
 		}
-		// Send without waiting for delivery (fire and forget for queued messages)
+		// Produce without waiting for delivery (fire and forget for queued messages)
 		for _, msg := range msgs {
 			kafkaMsg := c.buildKafkaMessage(topic, msg)
 			if err := c.producer.Produce(kafkaMsg, nil); err != nil {

@@ -25,17 +25,17 @@ func main() {
 	// Messages with the same key are grouped together for batch processing
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers("localhost:9092"),
-		kafka.WithGroupID("order-group-processors"),
-		kafka.WithTopics("orders"),
+		kafka.ConsumerWithGroupID("order-group-processors"),
+		kafka.ConsumerWithTopics("orders"),
 
 		// Enable batch processing with key grouping
-		kafka.WithBatchProcessing(true),
-		kafka.WithBatchSize(50),
-		kafka.WithBatchTimeout(5*time.Second),
-		kafka.WithGroupByKey(true), // Enable key grouping
+		kafka.ConsumerWithBatchProcessing(true),
+		kafka.ConsumerWithBatchSize(50),
+		kafka.ConsumerWithBatchTimeout(5*time.Second),
+		kafka.ConsumerWithGroupByKey(true), // Enable key grouping
 
 		// Use cooperative sticky assignor for better rebalancing
-		kafka.WithPartitionAssignor(kafka.AssignorCooperativeSticky),
+		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
 		// Logging
 		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
@@ -46,7 +46,7 @@ func main() {
 
 	// Register grouped batch handler
 	// Messages are grouped by key (customer ID in this case)
-	consumer.HandleGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) error {
+	consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) error {
 		log.Printf("Processing %d customer groups", len(groups))
 
 		for _, group := range groups {

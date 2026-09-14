@@ -2,7 +2,7 @@
 // built on top of confluent-kafka-go.
 //
 // Features:
-//   - High-performance producer with Send(), SendBatch(), SendQueued() methods
+//   - High-performance producer with Produce(), ProduceBatch(), ProduceAsync() methods
 //   - Handler-based consumer with auto-discovery and registration
 //   - Intelligent batch processing with configurable size and timeout
 //   - Key-based grouping within batches for ordered processing
@@ -14,14 +14,14 @@
 //
 // Quick Start:
 //
-//	// Create client
-//	client, err := kafka.NewClient(
-//	    kafka.WithBrokers("localhost:9092"),
-//	    kafka.WithClientID("my-app"),
+//	// Create producer
+//	producer, err := kafka.NewProducer(
+//	    kafka.ProducerWithBrokers("localhost:9092"),
+//	    kafka.ProducerWithClientID("my-app"),
 //	)
 //
-//	// Send message
-//	err = client.Send(ctx, "topic", &kafka.Message{
+//	// Produce message
+//	err = producer.Produce(ctx, "topic", &kafka.Message{
 //	    Key:   []byte("key"),
 //	    Value: []byte("value"),
 //	})
@@ -29,12 +29,12 @@
 //	// Create consumer
 //	consumer, err := kafka.NewConsumer(
 //	    kafka.ConsumerWithBrokers("localhost:9092"),
-//	    kafka.WithGroupID("my-group"),
-//	    kafka.WithTopics("topic"),
+//	    kafka.ConsumerWithGroupID("my-group"),
+//	    kafka.ConsumerWithTopics("topic"),
 //	)
 //
 //	// Register handler
-//	consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+//	consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
 //	    // Process message
 //	    return nil
 //	})

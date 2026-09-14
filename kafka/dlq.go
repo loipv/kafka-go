@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 // DLQService handles Dead Letter Queue operations
 type DLQService struct {
-	producer *kafka.Producer
+	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *DLQMetricsCollector
 	logger   Logger
@@ -23,12 +23,12 @@ type DLQService struct {
 
 // NewDLQService creates a new DLQ service
 func NewDLQService(brokers []string, config *DLQConfig, metrics *DLQMetricsCollector, logger Logger) (*DLQService, error) {
-	configMap := &kafka.ConfigMap{
+	configMap := &ckafka.ConfigMap{
 		"bootstrap.servers": strings.Join(brokers, ","),
 		"acks":              -1, // All replicas
 	}
 
-	producer, err := kafka.NewProducer(configMap)
+	producer, err := ckafka.NewProducer(configMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DLQ producer: %w", err)
 	}
@@ -46,7 +46,7 @@ func NewDLQService(brokers []string, config *DLQConfig, metrics *DLQMetricsColle
 }
 
 // SendToDLQ sends a failed message to the DLQ
-func (s *DLQService) SendToDLQ(ctx context.Context, msg *Message, err error) error {
+func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return fmt.Errorf("DLQ service is closed")
 	}
@@ -69,19 +69,19 @@ func (s *DLQService) SendToDLQ(ctx context.Context, msg *Message, err error) err
 	}
 	msg.Headers["x-dlq-handler-retry-count"] = []byte(strconv.Itoa(retryCount))
 
-	return s.SendToTopic(ctx, s.config.Topic, msg)
+	return s.produceToTopic(ctx, s.config.Topic, msg)
 }
 
 // SendToTopic sends a message to a specific topic
-func (s *DLQService) SendToTopic(ctx context.Context, topic string, msg *Message) error {
+func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Message) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return fmt.Errorf("DLQ service is closed")
 	}
 
-	kafkaMsg := &kafka.Message{
-		TopicPartition: kafka.TopicPartition{
+	kafkaMsg := &ckafka.Message{
+		TopicPartition: ckafka.TopicPartition{
 			Topic:     &topic,
-			Partition: kafka.PartitionAny,
+			Partition: ckafka.PartitionAny,
 		},
 		Key:   msg.Key,
 		Value: msg.Value,
@@ -89,13 +89,13 @@ func (s *DLQService) SendToTopic(ctx context.Context, topic string, msg *Message
 
 	// Add headers
 	for k, v := range msg.Headers {
-		kafkaMsg.Headers = append(kafkaMsg.Headers, kafka.Header{
+		kafkaMsg.Headers = append(kafkaMsg.Headers, ckafka.Header{
 			Key:   k,
 			Value: v,
 		})
 	}
 
-	deliveryChan := make(chan kafka.Event, 1)
+	deliveryChan := make(chan ckafka.Event, 1)
 	err := s.producer.Produce(kafkaMsg, deliveryChan)
 	if err != nil {
 		return fmt.Errorf("failed to produce to DLQ: %w", err)
@@ -104,7 +104,7 @@ func (s *DLQService) SendToTopic(ctx context.Context, topic string, msg *Message
 	// Wait for delivery
 	select {
 	case e := <-deliveryChan:
-		m := e.(*kafka.Message)
+		m := e.(*ckafka.Message)
 		if m.TopicPartition.Error != nil {
 			return fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
 		}

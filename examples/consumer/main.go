@@ -25,16 +25,16 @@ func main() {
 	consumer, err := kafka.NewConsumer(
 		// Connection
 		kafka.ConsumerWithBrokers("localhost:9092"),
-		kafka.WithGroupID("order-processors"),
-		kafka.WithTopics("orders"),
+		kafka.ConsumerWithGroupID("order-processors"),
+		kafka.ConsumerWithTopics("orders"),
 
 		// Batch processing
-		kafka.WithBatchProcessing(true),
-		kafka.WithBatchSize(10),
-		kafka.WithBatchTimeout(3*time.Second),
+		kafka.ConsumerWithBatchProcessing(true),
+		kafka.ConsumerWithBatchSize(10),
+		kafka.ConsumerWithBatchTimeout(3*time.Second),
 
 		// DLQ configuration
-		kafka.WithDLQ(&kafka.DLQConfig{
+		kafka.ConsumerWithDLQ(&kafka.DLQConfig{
 			Topic:                  "orders-dlq",
 			MaxRetries:             3,
 			RetryDelay:             1 * time.Second,
@@ -48,7 +48,7 @@ func main() {
 		}),
 
 		// DLQ auto-retry
-		kafka.WithDLQRetry(&kafka.DLQRetryConfig{
+		kafka.ConsumerWithDLQRetry(&kafka.DLQRetryConfig{
 			Enabled:           true,
 			MaxRetries:        5,
 			Delay:             1 * time.Minute,
@@ -57,16 +57,16 @@ func main() {
 		}),
 
 		// Idempotency
-		kafka.WithIdempotencyKey(func(msg *kafka.Message) string {
+		kafka.ConsumerWithIdempotencyKey(func(msg *kafka.Message) string {
 			if eventID, ok := msg.Headers["event-id"]; ok {
 				return string(eventID)
 			}
 			return ""
 		}),
-		kafka.WithIdempotencyTTL(1*time.Hour),
+		kafka.ConsumerWithIdempotencyTTL(1*time.Hour),
 
 		// Retry configuration
-		kafka.WithConsumerRetry(&kafka.RetryConfig{
+		kafka.ConsumerWithRetry(&kafka.RetryConfig{
 			MaxRetries:      3,
 			InitialInterval: 1 * time.Second,
 			Multiplier:      2.0,
@@ -82,7 +82,7 @@ func main() {
 		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
 
 		// Error handler
-		kafka.WithErrorHandler(func(err error, msg *kafka.Message) {
+		kafka.ConsumerWithErrorHandler(func(err error, msg *kafka.Message) {
 			log.Printf("Error processing message (key=%s): %v", string(msg.Key), err)
 		}),
 	)
@@ -91,7 +91,7 @@ func main() {
 	}
 
 	// Register batch handler
-	consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
+	consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
 		log.Printf("Processing batch of %d messages", len(msgs))
 
 		for _, msg := range msgs {
@@ -132,7 +132,7 @@ func main() {
 	defer shutdownCancel()
 
 	// Print DLQ metrics before closing
-	metrics := consumer.GetDLQMetrics()
+	metrics := consumer.DLQMetrics()
 	log.Printf("DLQ Metrics: %+v", metrics.Global)
 
 	if err := consumer.Close(shutdownCtx); err != nil {

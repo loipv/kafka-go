@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -20,7 +20,7 @@ const (
 	MessagingOperationNameKey       = "messaging.operation.name"
 	MessagingOperationTypeKey       = "messaging.operation.type"
 	MessagingKafkaOffsetKey         = "messaging.kafka.offset"
-	MessagingKafkaConsumerGroupKey  = "messaging.kafka.consumer.group"
+	MessagingConsumerGroupKey       = "messaging.kafka.consumer.group"
 	MessagingKafkaMessageKeyKey     = "messaging.kafka.message.key"
 	MessagingBatchMessageCountKey   = "messaging.batch.message_count"
 )
@@ -100,7 +100,7 @@ func (t *TracingService) StartConsumerSpan(ctx context.Context, groupID string, 
 			attribute.String(MessagingOperationNameKey, "process"),
 			attribute.String(MessagingOperationTypeKey, "process"),
 			attribute.Int64(MessagingKafkaOffsetKey, msg.Offset),
-			attribute.String(MessagingKafkaConsumerGroupKey, groupID),
+			attribute.String(MessagingConsumerGroupKey, groupID),
 		),
 	)
 
@@ -154,7 +154,7 @@ func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID str
 			attribute.String(MessagingDestinationNameKey, topic),
 			attribute.String(MessagingOperationNameKey, "process"),
 			attribute.String(MessagingOperationTypeKey, "process"),
-			attribute.String(MessagingKafkaConsumerGroupKey, groupID),
+			attribute.String(MessagingConsumerGroupKey, groupID),
 			attribute.Int(MessagingBatchMessageCountKey, len(msgs)),
 		),
 	)
@@ -169,7 +169,7 @@ func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID str
 }
 
 // InjectTraceContext injects trace context into Kafka message headers
-func (t *TracingService) InjectTraceContext(ctx context.Context, msg *kafka.Message) {
+func (t *TracingService) InjectTraceContext(ctx context.Context, msg *ckafka.Message) {
 	carrier := &kafkaHeaderCarrier{msg: msg}
 	t.propagator.Inject(ctx, carrier)
 }
@@ -180,9 +180,9 @@ func (t *TracingService) ExtractTraceContext(ctx context.Context, msg *Message) 
 	return t.propagator.Extract(ctx, carrier)
 }
 
-// kafkaHeaderCarrier implements propagation.TextMapCarrier for kafka.Message
+// kafkaHeaderCarrier implements propagation.TextMapCarrier for ckafka.Message
 type kafkaHeaderCarrier struct {
-	msg *kafka.Message
+	msg *ckafka.Message
 }
 
 func (c *kafkaHeaderCarrier) Get(key string) string {
@@ -203,7 +203,7 @@ func (c *kafkaHeaderCarrier) Set(key, val string) {
 		}
 	}
 	// Append new header if not found
-	c.msg.Headers = append(c.msg.Headers, kafka.Header{
+	c.msg.Headers = append(c.msg.Headers, ckafka.Header{
 		Key:   key,
 		Value: []byte(val),
 	})

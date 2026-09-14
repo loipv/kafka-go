@@ -19,8 +19,8 @@ type Message struct {
 	Topic     string
 }
 
-// TopicMessages represents messages for a specific topic
-type TopicMessages struct {
+// TopicBatch represents messages for a specific topic
+type TopicBatch struct {
 	Topic    string
 	Messages []*Message
 }
@@ -154,60 +154,6 @@ type TopicPartition struct {
 // RebalanceCallback is called when partitions are assigned or revoked
 // Return an error to abort the rebalance (use with caution)
 type RebalanceCallback func(event RebalanceEvent) error
-
-// Client interface defines the producer API
-type Client interface {
-	// Send sends a single message to a topic
-	Send(ctx context.Context, topic string, msg *Message) error
-
-	// SendBatch sends multiple messages to a single topic
-	SendBatch(ctx context.Context, topic string, msgs []*Message) error
-
-	// SendMultiTopicBatch sends messages to multiple topics
-	SendMultiTopicBatch(ctx context.Context, batches []TopicMessages) error
-
-	// SendQueued queues a message for automatic batching
-	SendQueued(ctx context.Context, topic string, msg *Message) error
-
-	// Flush waits for all queued messages to be sent
-	Flush(timeout time.Duration) error
-
-	// Close closes the client
-	Close() error
-}
-
-// Consumer interface defines the consumer API
-type Consumer interface {
-	// Handle registers a handler for single messages
-	Handle(handler MessageHandler)
-
-	// HandleBatch registers a handler for batch messages
-	HandleBatch(handler BatchHandler)
-
-	// HandleGroupedBatch registers a handler for key-grouped batches
-	HandleGroupedBatch(handler GroupedBatchHandler)
-
-	// Start starts consuming messages (blocking)
-	Start(ctx context.Context) error
-
-	// Close closes the consumer
-	Close(ctx context.Context) error
-
-	// Pause pauses consumption
-	Pause()
-
-	// Resume resumes consumption
-	Resume()
-
-	// GetDLQMetrics returns DLQ metrics
-	GetDLQMetrics() *DLQMetrics
-
-	// GetCircuitState returns circuit breaker state
-	GetCircuitState(dlqTopic string) CircuitState
-
-	// ResetCircuit resets the circuit breaker
-	ResetCircuit(dlqTopic string)
-}
 
 // DLQMetrics represents DLQ metrics
 type DLQMetrics struct {

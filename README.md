@@ -4,7 +4,7 @@ A production-ready Go library for Kafka client and consumer functionality built 
 
 ## Features
 
-- **Producer (Client)**: High-performance Kafka producer with `Send()`, `SendBatch()`, `SendQueued()` methods
+- **Producer**: High-performance Kafka producer with `Produce()`, `ProduceBatch()`, `ProduceAsync()` methods
 - **Consumer**: Handler-based consumer with auto-discovery and registration
 - **Batch Processing**: Intelligent batching with configurable size and timeout
 - **Key-Based Grouping**: Group messages by key within batches for ordered processing
@@ -88,17 +88,17 @@ import (
 
 func main() {
     // Create client with options
-    client, err := kafka.NewClient(
-        kafka.WithBrokers("localhost:9092"),
-        kafka.WithClientID("my-app"),
+    client, err := kafka.NewProducer(
+        kafka.ProducerWithBrokers("localhost:9092"),
+        kafka.ProducerWithClientID("my-app"),
     )
     if err != nil {
         log.Fatal(err)
     }
     defer client.Close()
 
-    // Send a message
-    err = client.Send(context.Background(), "orders", &kafka.Message{
+    // Produce a message
+    err = client.Produce(context.Background(), "orders", &kafka.Message{
         Key:   []byte("customer-123"),
         Value: []byte(`{"orderId": "123", "amount": 100}`),
     })
@@ -124,8 +124,8 @@ func main() {
     // Create consumer
     consumer, err := kafka.NewConsumer(
         kafka.ConsumerWithBrokers("localhost:9092"),
-        kafka.WithGroupID("order-processors"),
-        kafka.WithTopics("orders"),
+        kafka.ConsumerWithGroupID("order-processors"),
+        kafka.ConsumerWithTopics("orders"),
     )
     if err != nil {
         log.Fatal(err)
@@ -133,7 +133,7 @@ func main() {
     defer consumer.Close(context.Background())
 
     // Register handler
-    consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+    consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
         log.Printf("Processing order: %s", string(msg.Value))
         return nil
     })
@@ -150,15 +150,15 @@ func main() {
 ```go
 consumer, err := kafka.NewConsumer(
     kafka.ConsumerWithBrokers("localhost:9092"),
-    kafka.WithGroupID("order-processors"),
-    kafka.WithTopics("orders"),
-    kafka.WithBatchProcessing(true),
-    kafka.WithBatchSize(100),
-    kafka.WithBatchTimeout(5*time.Second),
+    kafka.ConsumerWithGroupID("order-processors"),
+    kafka.ConsumerWithTopics("orders"),
+    kafka.ConsumerWithBatchProcessing(true),
+    kafka.ConsumerWithBatchSize(100),
+    kafka.ConsumerWithBatchTimeout(5*time.Second),
 )
 
-// Handle batch of messages
-consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
+// OnBatch: process a batch of messages
+consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
     log.Printf("Processing %d orders", len(msgs))
     for _, msg := range msgs {
         // Process each message
@@ -172,30 +172,30 @@ consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
 ### Client Options
 
 ```go
-client, err := kafka.NewClient(
+client, err := kafka.NewProducer(
     // Required
-    kafka.WithBrokers("localhost:9092", "localhost:9093"),
-    kafka.WithClientID("my-app"),
+    kafka.ProducerWithBrokers("localhost:9092", "localhost:9093"),
+    kafka.ProducerWithClientID("my-app"),
 
     // Optional - SSL/SASL
-    kafka.WithSSL(true),
-    kafka.WithSASL(&kafka.SASLConfig{
+    kafka.ProducerWithSSL(true),
+    kafka.ProducerWithSASL(&kafka.SASLConfig{
         Mechanism: "SCRAM-SHA-256",
         Username:  os.Getenv("KAFKA_USERNAME"),
         Password:  os.Getenv("KAFKA_PASSWORD"),
     }),
 
     // Optional - Connection settings
-    kafka.WithConnectionTimeout(3*time.Second),
-    kafka.WithRequestTimeout(30*time.Second),
+    kafka.ProducerWithConnectionTimeout(3*time.Second),
+    kafka.ProducerWithRequestTimeout(30*time.Second),
 
     // Optional - Producer settings
-    kafka.WithAcks(kafka.AcksAll),           // -1 (all), 0 (none), 1 (leader only)
-    kafka.WithCompression(kafka.CompressionGZIP),
-    kafka.WithIdempotent(true),
+    kafka.ProducerWithAcks(kafka.AcksAll),           // -1 (all), 0 (none), 1 (leader only)
+    kafka.ProducerWithCompression(kafka.CompressionGZIP),
+    kafka.ProducerWithIdempotent(true),
 
     // Optional - Retry configuration
-    kafka.WithRetry(&kafka.RetryConfig{
+    kafka.ProducerWithRetry(&kafka.RetryConfig{
         MaxRetries:       8,
         InitialInterval:  100*time.Millisecond,
         MaxInterval:      30*time.Second,
@@ -204,10 +204,10 @@ client, err := kafka.NewClient(
 
     // Optional - Logging
     kafka.WithLogLevel(kafka.LogLevelInfo),
-    kafka.WithLogger(customLogger), // Custom logger implementation
+    kafka.ProducerWithLogger(customLogger), // Custom logger implementation
 
     // Optional - Tracing
-    kafka.WithTracing(&kafka.TracingConfig{
+    kafka.ProducerWithTracing(&kafka.TracingConfig{
         Enabled:       true,
         TracerName:    "my-kafka-service",
         TracerVersion: "1.0.0",
@@ -221,8 +221,8 @@ client, err := kafka.NewClient(
 consumer, err := kafka.NewConsumer(
     // Required
     kafka.ConsumerWithBrokers("localhost:9092"),
-    kafka.WithGroupID("my-consumer-group"),
-    kafka.WithTopics("topic1", "topic2"),
+    kafka.ConsumerWithGroupID("my-consumer-group"),
+    kafka.ConsumerWithTopics("topic1", "topic2"),
 
     // Optional - SSL/SASL authentication
     kafka.ConsumerWithSSL(true),
@@ -233,24 +233,24 @@ consumer, err := kafka.NewConsumer(
     }),
 
     // Optional - Session settings
-    kafka.WithSessionTimeout(30*time.Second),
-    kafka.WithHeartbeatInterval(3*time.Second),
-    kafka.WithRebalanceTimeout(60*time.Second),
+    kafka.ConsumerWithSessionTimeout(30*time.Second),
+    kafka.ConsumerWithHeartbeatInterval(3*time.Second),
+    kafka.ConsumerWithRebalanceTimeout(60*time.Second),
 
     // Optional - Batch processing
-    kafka.WithBatchProcessing(true),
-    kafka.WithBatchSize(100),              // Max messages per batch
-    kafka.WithBatchTimeout(5*time.Second), // Max wait time
-    kafka.WithGroupByKey(true),            // Group messages by key
+    kafka.ConsumerWithBatchProcessing(true),
+    kafka.ConsumerWithBatchSize(100),              // Max messages per batch
+    kafka.ConsumerWithBatchTimeout(5*time.Second), // Max wait time
+    kafka.ConsumerWithGroupByKey(true),            // Group messages by key
 
     // Optional - Idempotency
-    kafka.WithIdempotencyKey(func(msg *kafka.Message) string {
+    kafka.ConsumerWithIdempotencyKey(func(msg *kafka.Message) string {
         return string(msg.Headers["event-id"])
     }),
-    kafka.WithIdempotencyTTL(1*time.Hour),
+    kafka.ConsumerWithIdempotencyTTL(1*time.Hour),
 
     // Optional - Dead Letter Queue
-    kafka.WithDLQ(&kafka.DLQConfig{
+    kafka.ConsumerWithDLQ(&kafka.DLQConfig{
         Topic:                 "orders-dlq",
         MaxRetries:            3,
         RetryDelay:            1*time.Second,
@@ -259,7 +259,7 @@ consumer, err := kafka.NewConsumer(
     }),
 
     // Optional - DLQ Auto-Retry
-    kafka.WithDLQRetry(&kafka.DLQRetryConfig{
+    kafka.ConsumerWithDLQRetry(&kafka.DLQRetryConfig{
         Enabled:           true,
         MaxRetries:        5,
         Delay:             1*time.Minute,
@@ -268,21 +268,21 @@ consumer, err := kafka.NewConsumer(
     }),
 
     // Optional - Commit settings
-    kafka.WithAutoCommit(true),
-    kafka.WithAutoCommitInterval(5*time.Second),
-    kafka.WithFromBeginning(false),
+    kafka.ConsumerWithAutoCommit(true),
+    kafka.ConsumerWithAutoCommitInterval(5*time.Second),
+    kafka.ConsumerWithFromBeginning(false),
 
     // Optional - Partition assignment
-    kafka.WithPartitionAssignor(kafka.AssignorCooperativeSticky),
+    kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
     // Optional - Rebalance callback
-    kafka.WithRebalanceCallback(func(event kafka.RebalanceEvent) error {
+    kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {
         // Handle partition assignment/revocation
         return nil
     }),
 
     // Optional - Retry
-    kafka.WithConsumerRetry(&kafka.RetryConfig{
+    kafka.ConsumerWithRetry(&kafka.RetryConfig{
         MaxRetries:            3,
         InitialInterval:       1*time.Second,
         Multiplier:            2.0,
@@ -296,7 +296,7 @@ consumer, err := kafka.NewConsumer(
 ### Basic Consumer
 
 ```go
-consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
     // Process single message
     order := &Order{}
     if err := json.Unmarshal(msg.Value, order); err != nil {
@@ -310,13 +310,13 @@ consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithBatchProcessing(true),
-    kafka.WithBatchSize(100),
-    kafka.WithBatchTimeout(5*time.Second),
+    kafka.ConsumerWithBatchProcessing(true),
+    kafka.ConsumerWithBatchSize(100),
+    kafka.ConsumerWithBatchTimeout(5*time.Second),
     // ... other options
 )
 
-consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
+consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
     // Process batch of messages
     for _, msg := range msgs {
         // ...
@@ -329,13 +329,13 @@ consumer.HandleBatch(func(ctx context.Context, msgs []*kafka.Message) error {
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithBatchProcessing(true),
-    kafka.WithBatchSize(100),
-    kafka.WithGroupByKey(true),
+    kafka.ConsumerWithBatchProcessing(true),
+    kafka.ConsumerWithBatchSize(100),
+    kafka.ConsumerWithGroupByKey(true),
     // ... other options
 )
 
-consumer.HandleGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) error {
+consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) error {
     // groups = [{Key: "customer-1", Messages: [...]}, ...]
     for _, group := range groups {
         log.Printf("Processing %d orders for %s", len(group.Messages), group.Key)
@@ -350,11 +350,11 @@ Use rebalance callbacks to handle partition assignment/revocation events:
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithTopics("orders"),
-    kafka.WithAutoCommit(false), // Manual commit for precise control
-    kafka.WithPartitionAssignor(kafka.AssignorCooperativeSticky),
+    kafka.ConsumerWithTopics("orders"),
+    kafka.ConsumerWithAutoCommit(false), // Manual commit for precise control
+    kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
     
-    kafka.WithRebalanceCallback(func(event kafka.RebalanceEvent) error {
+    kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {
         switch event.Type {
         case "assigned":
             for _, tp := range event.Partitions {
@@ -390,8 +390,8 @@ consumer, _ := kafka.NewConsumer(
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithTopics("payments"),
-    kafka.WithDLQ(&kafka.DLQConfig{
+    kafka.ConsumerWithTopics("payments"),
+    kafka.ConsumerWithDLQ(&kafka.DLQConfig{
         Topic:                  "payments-dlq",
         MaxRetries:             3,
         RetryDelay:             1*time.Second,
@@ -401,7 +401,7 @@ consumer, _ := kafka.NewConsumer(
     // ... other options
 )
 
-consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
     // If this returns error, message will be retried then sent to DLQ
     return processPayment(msg)
 })
@@ -411,18 +411,18 @@ consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithTopics("events"),
-    kafka.WithIdempotencyKey(func(msg *kafka.Message) string {
+    kafka.ConsumerWithTopics("events"),
+    kafka.ConsumerWithIdempotencyKey(func(msg *kafka.Message) string {
         if eventID, ok := msg.Headers["event-id"]; ok {
             return string(eventID)
         }
         return ""
     }),
-    kafka.WithIdempotencyTTL(1*time.Hour),
+    kafka.ConsumerWithIdempotencyTTL(1*time.Hour),
     // ... other options
 )
 
-consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
+consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
     // Duplicate messages (same event-id) will be skipped automatically
     return processEvent(msg)
 })
@@ -433,8 +433,8 @@ consumer.Handle(func(ctx context.Context, msg *kafka.Message) error {
 ### Client Methods
 
 ```go
-// Send single message
-err := client.Send(ctx, "topic", &kafka.Message{
+// Produce single message
+err := client.Produce(ctx, "topic", &kafka.Message{
     Key:   []byte("message-key"),
     Value: []byte(`{"data": "value"}`),
     Headers: kafka.Headers{
@@ -442,27 +442,27 @@ err := client.Send(ctx, "topic", &kafka.Message{
     },
 })
 
-// Send batch to single topic
-err := client.SendBatch(ctx, "topic", []*kafka.Message{
+// Produce batch to single topic
+err := client.ProduceBatch(ctx, "topic", []*kafka.Message{
     {Key: []byte("key1"), Value: []byte("value1")},
     {Key: []byte("key2"), Value: []byte("value2")},
 })
 
-// Send to multiple topics
-err := client.SendMultiTopicBatch(ctx, []kafka.TopicMessages{
+// Produce to multiple topics
+err := client.ProduceMultiTopicBatch(ctx, []kafka.TopicBatch{
     {Topic: "topic1", Messages: []*kafka.Message{{Value: []byte("msg1")}}},
     {Topic: "topic2", Messages: []*kafka.Message{{Value: []byte("msg2")}}},
 })
 
 // Queue message for auto-batching
-err := client.SendQueued(ctx, "topic", &kafka.Message{Value: []byte("message")})
+err := client.ProduceAsync(ctx, "topic", &kafka.Message{Value: []byte("message")})
 ```
 
 ### Message Options
 
 ```go
-// Send with specific partition
-err := client.Send(ctx, "topic", &kafka.Message{
+// Produce with specific partition
+err := client.Produce(ctx, "topic", &kafka.Message{
     Key:       []byte("key"),
     Value:     []byte("value"),
     Partition: kafka.PartitionAny, // or specific partition number
@@ -564,10 +564,10 @@ func initTracer() (*sdktrace.TracerProvider, error) {
 }
 
 // Create client with tracing enabled
-client, err := kafka.NewClient(
-    kafka.WithBrokers("localhost:9092"),
-    kafka.WithClientID("my-app"),
-    kafka.WithTracing(&kafka.TracingConfig{
+client, err := kafka.NewProducer(
+    kafka.ProducerWithBrokers("localhost:9092"),
+    kafka.ProducerWithClientID("my-app"),
+    kafka.ProducerWithTracing(&kafka.TracingConfig{
         Enabled:       true,
         TracerName:    "my-kafka-service",
         TracerVersion: "1.0.0",
@@ -615,7 +615,7 @@ The DLQ system includes a circuit breaker to prevent flooding DLQ when the syste
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithDLQ(&kafka.DLQConfig{
+    kafka.ConsumerWithDLQ(&kafka.DLQConfig{
         Topic:      "orders-dlq",
         MaxRetries: 3,
         CircuitBreaker: &kafka.CircuitBreakerConfig{
@@ -628,7 +628,7 @@ consumer, _ := kafka.NewConsumer(
 )
 
 // Get circuit state
-state := consumer.GetCircuitState("orders-dlq")
+state := consumer.CircuitState("orders-dlq")
 // States: CircuitClosed, CircuitOpen, CircuitHalfOpen
 
 // Reset circuit manually
@@ -639,7 +639,7 @@ consumer.ResetCircuit("orders-dlq")
 
 ```go
 // Get DLQ metrics
-metrics := consumer.GetDLQMetrics()
+metrics := consumer.DLQMetrics()
 // {
 //   Global: {HandlerRetries: 10, MessagesSentToDLQ: 2, ReprocessAttempts: 5},
 //   ByTopic: {"orders": {HandlerRetries: 10, SentToDLQ: 2}},
@@ -688,23 +688,23 @@ func (l *MyLogger) Error(format string, args ...interface{}) {
 }
 
 // Use with client
-client, _ := kafka.NewClient(
-    kafka.WithBrokers("localhost:9092"),
-    kafka.WithLogger(&MyLogger{}),
+client, _ := kafka.NewProducer(
+    kafka.ProducerWithBrokers("localhost:9092"),
+    kafka.ProducerWithLogger(&MyLogger{}),
 )
 
 // Use with consumer
 consumer, _ := kafka.NewConsumer(
     kafka.ConsumerWithBrokers("localhost:9092"),
-    kafka.WithGroupID("my-group"),
-    kafka.WithTopics("orders"),
+    kafka.ConsumerWithGroupID("my-group"),
+    kafka.ConsumerWithTopics("orders"),
     kafka.ConsumerWithLogger(&MyLogger{}),
 )
 
 // Or use the default no-op logger to disable logging
-client, _ := kafka.NewClient(
-    kafka.WithBrokers("localhost:9092"),
-    kafka.WithLogger(kafka.NewNoopLogger()),
+client, _ := kafka.NewProducer(
+    kafka.ProducerWithBrokers("localhost:9092"),
+    kafka.ProducerWithLogger(kafka.NewNoopLogger()),
 )
 ```
 
@@ -744,7 +744,7 @@ if err := consumer.Close(shutdownCtx); err != nil {
 
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.WithErrorHandler(func(err error, msg *kafka.Message) {
+    kafka.ConsumerWithErrorHandler(func(err error, msg *kafka.Message) {
         log.Printf("Error processing message: %v, key: %s", err, msg.Key)
         // Custom error handling logic
     }),
@@ -834,7 +834,7 @@ type Order struct {
     Amount   float64 `json:"amount"`
 }
 
-consumer.Handle(WithJSONDecoder(func(ctx context.Context, order Order, msg *kafka.Message) error {
+consumer.OnMessage(WithJSONDecoder(func(ctx context.Context, order Order, msg *kafka.Message) error {
     log.Printf("Order %s: %.2f", order.OrderID, order.Amount)
     return nil
 }))
@@ -870,7 +870,7 @@ func WithBatchDecoder[T any](
 }
 
 // Usage
-consumer.HandleBatch(WithBatchDecoder(JSONDecode[Order], func(ctx context.Context, orders []Order, msgs []*kafka.Message) error {
+consumer.OnBatch(WithBatchDecoder(JSONDecode[Order], func(ctx context.Context, orders []Order, msgs []*kafka.Message) error {
     return db.InsertOrders(ctx, orders)
 }))
 ```
@@ -909,7 +909,7 @@ func WithGroupedBatchDecoder[T any](
 }
 
 // Usage: aggregate orders by customer
-consumer.HandleGroupedBatch(WithGroupedBatchDecoder(JSONDecode[Order], func(ctx context.Context, groups []TypedGroupedBatch[Order]) error {
+consumer.OnGroupedBatch(WithGroupedBatchDecoder(JSONDecode[Order], func(ctx context.Context, groups []TypedGroupedBatch[Order]) error {
     for _, group := range groups {
         total := 0.0
         for _, order := range group.Values {
@@ -971,8 +971,8 @@ type GroupedBatch struct {
     Messages []*Message
 }
 
-// TopicMessages represents messages for a specific topic
-type TopicMessages struct {
+// TopicBatch represents messages for a specific topic
+type TopicBatch struct {
     Topic    string
     Messages []*Message
 }
@@ -1045,72 +1045,6 @@ const (
     LogLevelInfo  LogLevel = 3
     LogLevelDebug LogLevel = 4
 )
-```
-
-### Client Interface
-
-```go
-type Client interface {
-    // Send sends a single message to a topic
-    Send(ctx context.Context, topic string, msg *Message) error
-    
-    // SendBatch sends multiple messages to a single topic
-    SendBatch(ctx context.Context, topic string, msgs []*Message) error
-    
-    // SendMultiTopicBatch sends messages to multiple topics
-    SendMultiTopicBatch(ctx context.Context, batches []TopicMessages) error
-    
-    // SendQueued queues a message for automatic batching
-    SendQueued(ctx context.Context, topic string, msg *Message) error
-    
-    // Flush waits for all queued messages to be sent
-    Flush(timeout time.Duration) error
-    
-    // Close closes the client
-    Close() error
-}
-```
-
-### Consumer Interface
-
-```go
-type Consumer interface {
-    // Handle registers a handler for single messages
-    Handle(handler MessageHandler)
-    
-    // HandleBatch registers a handler for batch messages
-    HandleBatch(handler BatchHandler)
-    
-    // HandleGroupedBatch registers a handler for key-grouped batches
-    HandleGroupedBatch(handler GroupedBatchHandler)
-    
-    // Start starts consuming messages (blocking)
-    Start(ctx context.Context) error
-    
-    // Close closes the consumer
-    Close(ctx context.Context) error
-    
-    // Pause pauses consumption
-    Pause()
-    
-    // Resume resumes consumption
-    Resume()
-    
-    // GetDLQMetrics returns DLQ metrics
-    GetDLQMetrics() *DLQMetrics
-    
-    // GetCircuitState returns circuit breaker state
-    GetCircuitState(dlqTopic string) CircuitState
-    
-    // ResetCircuit resets the circuit breaker
-    ResetCircuit(dlqTopic string)
-}
-
-// Handler types
-type MessageHandler func(ctx context.Context, msg *Message) error
-type BatchHandler func(ctx context.Context, msgs []*Message) error
-type GroupedBatchHandler func(ctx context.Context, groups []GroupedBatch) error
-type RebalanceCallback func(event RebalanceEvent) error
 ```
 
 ## License

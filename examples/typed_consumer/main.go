@@ -222,15 +222,15 @@ func main() {
 func example1SingleMessage(brokers string) {
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers(brokers),
-		kafka.WithGroupID("typed-consumer-example"),
-		kafka.WithTopics("orders"),
+		kafka.ConsumerWithGroupID("typed-consumer-example"),
+		kafka.ConsumerWithTopics("orders"),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Register typed handler
-	consumer.Handle(WithJSONDecoder(processOrder))
+	consumer.OnMessage(WithJSONDecoder(processOrder))
 
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -254,20 +254,20 @@ func example1SingleMessage(brokers string) {
 func example2BatchProcessing(brokers string) {
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers(brokers),
-		kafka.WithGroupID("typed-batch-consumer"),
-		kafka.WithTopics("orders"),
-		kafka.WithBatchProcessing(true),
-		kafka.WithBatchSize(100),
+		kafka.ConsumerWithGroupID("typed-batch-consumer"),
+		kafka.ConsumerWithTopics("orders"),
+		kafka.ConsumerWithBatchProcessing(true),
+		kafka.ConsumerWithBatchSize(100),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Register typed batch handler (skips invalid messages)
-	consumer.HandleBatch(WithBatchDecoder(JSONDecode[Order], processOrders))
+	consumer.OnBatch(WithBatchDecoder(JSONDecode[Order], processOrders))
 
 	// Or use strict mode (fails entire batch on decode error)
-	// consumer.HandleBatch(WithStrictBatchDecoder(JSONDecode[Order], processOrders))
+	// consumer.OnBatch(WithStrictBatchDecoder(JSONDecode[Order], processOrders))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
@@ -289,18 +289,18 @@ func example2BatchProcessing(brokers string) {
 func example3GroupedBatch(brokers string) {
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers(brokers),
-		kafka.WithGroupID("typed-grouped-consumer"),
-		kafka.WithTopics("orders"),
-		kafka.WithBatchProcessing(true),
-		kafka.WithBatchSize(100),
-		kafka.WithGroupByKey(true), // Group by message key (customer ID)
+		kafka.ConsumerWithGroupID("typed-grouped-consumer"),
+		kafka.ConsumerWithTopics("orders"),
+		kafka.ConsumerWithBatchProcessing(true),
+		kafka.ConsumerWithBatchSize(100),
+		kafka.ConsumerWithGroupByKey(true), // Group by message key (customer ID)
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Register typed grouped batch handler
-	consumer.HandleGroupedBatch(WithGroupedBatchDecoder(JSONDecode[Order], processOrdersByCustomer))
+	consumer.OnGroupedBatch(WithGroupedBatchDecoder(JSONDecode[Order], processOrdersByCustomer))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)

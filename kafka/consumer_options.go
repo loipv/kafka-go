@@ -113,147 +113,147 @@ func ConsumerWithSASL(sasl *SASLConfig) ConsumerOption {
 	}
 }
 
-// WithGroupID sets the consumer group ID
-func WithGroupID(groupID string) ConsumerOption {
+// ConsumerWithGroupID sets the consumer group ID
+func ConsumerWithGroupID(groupID string) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.GroupID = groupID
 	}
 }
 
-// WithTopics sets the topics to consume
-func WithTopics(topics ...string) ConsumerOption {
+// ConsumerWithTopics sets the topics to consume
+func ConsumerWithTopics(topics ...string) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Topics = topics
 	}
 }
 
-// WithSessionTimeout sets the session timeout
-func WithSessionTimeout(timeout time.Duration) ConsumerOption {
+// ConsumerWithSessionTimeout sets the session timeout
+func ConsumerWithSessionTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.SessionTimeout = timeout
 	}
 }
 
-// WithHeartbeatInterval sets the heartbeat interval
-func WithHeartbeatInterval(interval time.Duration) ConsumerOption {
+// ConsumerWithHeartbeatInterval sets the heartbeat interval
+func ConsumerWithHeartbeatInterval(interval time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.HeartbeatInterval = interval
 	}
 }
 
-// WithRebalanceTimeout sets the rebalance timeout
-func WithRebalanceTimeout(timeout time.Duration) ConsumerOption {
+// ConsumerWithRebalanceTimeout sets the rebalance timeout
+func ConsumerWithRebalanceTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.RebalanceTimeout = timeout
 	}
 }
 
-// WithBatchProcessing enables batch processing
-func WithBatchProcessing(enabled bool) ConsumerOption {
+// ConsumerWithBatchProcessing enables batch processing
+func ConsumerWithBatchProcessing(enabled bool) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchProcessing = enabled
 	}
 }
 
-// WithBatchSize sets the batch size
-func WithBatchSize(size int) ConsumerOption {
+// ConsumerWithBatchSize sets the batch size
+func ConsumerWithBatchSize(size int) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchSize = size
 	}
 }
 
-// WithBatchTimeout sets the batch timeout
-func WithBatchTimeout(timeout time.Duration) ConsumerOption {
+// ConsumerWithBatchTimeout sets the batch timeout
+func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchTimeout = timeout
 	}
 }
 
-// WithGroupByKey enables key-based grouping
-func WithGroupByKey(enabled bool) ConsumerOption {
+// ConsumerWithGroupByKey enables key-based grouping
+func ConsumerWithGroupByKey(enabled bool) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.GroupByKey = enabled
 	}
 }
 
-// WithIdempotencyKey sets the idempotency key extractor
-func WithIdempotencyKey(fn IdempotencyKeyFunc) ConsumerOption {
+// ConsumerWithIdempotencyKey sets the idempotency key extractor
+func ConsumerWithIdempotencyKey(fn IdempotencyKeyFunc) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.IdempotencyKey = fn
 	}
 }
 
-// WithIdempotencyTTL sets the idempotency TTL
-func WithIdempotencyTTL(ttl time.Duration) ConsumerOption {
+// ConsumerWithIdempotencyTTL sets the idempotency TTL
+func ConsumerWithIdempotencyTTL(ttl time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.IdempotencyTTL = ttl
 	}
 }
 
-// WithDLQ sets DLQ configuration
-func WithDLQ(dlq *DLQConfig) ConsumerOption {
+// ConsumerWithDLQ sets DLQ configuration
+func ConsumerWithDLQ(dlq *DLQConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.DLQ = dlq
 	}
 }
 
-// WithDLQRetry sets DLQ retry configuration
-func WithDLQRetry(retry *DLQRetryConfig) ConsumerOption {
+// ConsumerWithDLQRetry sets DLQ retry configuration
+func ConsumerWithDLQRetry(retry *DLQRetryConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.DLQRetry = retry
 	}
 }
 
-// WithAutoCommit sets auto commit
-func WithAutoCommit(enabled bool) ConsumerOption {
+// ConsumerWithAutoCommit sets auto commit
+func ConsumerWithAutoCommit(enabled bool) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.AutoCommit = enabled
 	}
 }
 
-// WithAutoCommitInterval sets auto commit interval
-func WithAutoCommitInterval(interval time.Duration) ConsumerOption {
+// ConsumerWithAutoCommitInterval sets auto commit interval
+func ConsumerWithAutoCommitInterval(interval time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.AutoCommitInterval = interval
 	}
 }
 
-// WithFromBeginning sets whether to start from the beginning
-func WithFromBeginning(enabled bool) ConsumerOption {
+// ConsumerWithFromBeginning sets whether to start from the beginning
+func ConsumerWithFromBeginning(enabled bool) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.FromBeginning = enabled
 	}
 }
 
-// WithPartitionAssignor sets the partition assignment strategy
-func WithPartitionAssignor(assignor PartitionAssignor) ConsumerOption {
+// ConsumerWithPartitionAssignor sets the partition assignment strategy
+func ConsumerWithPartitionAssignor(assignor PartitionAssignor) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.PartitionAssignor = assignor
 	}
 }
 
-// WithConsumerRetry sets consumer retry configuration
-func WithConsumerRetry(retry *RetryConfig) ConsumerOption {
+// ConsumerWithRetry sets consumer retry configuration
+func ConsumerWithRetry(retry *RetryConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Retry = retry
 	}
 }
 
-// WithErrorHandler sets the error handler
-func WithErrorHandler(handler ErrorHandler) ConsumerOption {
+// ConsumerWithErrorHandler sets the error handler
+func ConsumerWithErrorHandler(handler ErrorHandler) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.ErrorHandler = handler
 	}
 }
 
-// WithRebalanceCallback sets the rebalance callback
+// ConsumerWithRebalanceCallback sets the rebalance callback
 // The callback is invoked when partitions are assigned or revoked during a rebalance
 // Use this for:
 // - Manual offset commits before partition revocation
 // - Resource cleanup when losing partitions
 // - Initializing resources when gaining new partitions
 // - Logging/monitoring rebalance events
-func WithRebalanceCallback(callback RebalanceCallback) ConsumerOption {
+func ConsumerWithRebalanceCallback(callback RebalanceCallback) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.RebalanceCallback = callback
 	}
@@ -283,15 +283,15 @@ func ConsumerWithLogger(logger Logger) ConsumerOption {
 // newDefaultConsumerConfig creates a new consumer config with default values
 func newDefaultConsumerConfig() *ConsumerConfig {
 	return &ConsumerConfig{
-		SessionTimeout:        DefaultSessionTimeout,
-		HeartbeatInterval:     DefaultHeartbeatInterval,
-		RebalanceTimeout:      DefaultRebalanceTimeout,
-		BatchSize:             DefaultBatchSize,
-		BatchTimeout:          DefaultBatchTimeout,
-		IdempotencyTTL:        DefaultIdempotencyTTL,
-		AutoCommit:            true,
-		AutoCommitInterval:    DefaultAutoCommitInterval,
-		PartitionAssignor:     AssignorRange,
-		LogLevel:              LogLevelInfo,
+		SessionTimeout:     DefaultSessionTimeout,
+		HeartbeatInterval:  DefaultHeartbeatInterval,
+		RebalanceTimeout:   DefaultRebalanceTimeout,
+		BatchSize:          DefaultBatchSize,
+		BatchTimeout:       DefaultBatchTimeout,
+		IdempotencyTTL:     DefaultIdempotencyTTL,
+		AutoCommit:         true,
+		AutoCommitInterval: DefaultAutoCommitInterval,
+		PartitionAssignor:  AssignorRange,
+		LogLevel:           LogLevelInfo,
 	}
 }
