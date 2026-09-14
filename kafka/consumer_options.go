@@ -57,6 +57,9 @@ type ConsumerConfig struct {
 	// Logging
 	LogLevel LogLevel
 	Logger   Logger
+
+	// Escape hatch
+	Raw map[string]any
 }
 
 // DLQConfig holds Dead Letter Queue configuration
@@ -278,6 +281,13 @@ func ConsumerWithLogger(logger Logger) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Logger = logger
 	}
+}
+
+// ConsumerWithRawConfig merges raw librdkafka consumer configuration keys,
+// overriding anything the library itself set. Use it for keys this library
+// does not model (e.g. "fetch.min.bytes", "max.partition.fetch.bytes").
+func ConsumerWithRawConfig(raw map[string]any) ConsumerOption {
+	return func(c *ConsumerConfig) { c.Raw = raw }
 }
 
 // newDefaultConsumerConfig creates a new consumer config with default values

@@ -30,6 +30,9 @@ type ProducerConfig struct {
 
 	// Tracing
 	Tracing *TracingConfig
+
+	// Escape hatch
+	Raw map[string]any
 }
 
 // SASLConfig holds SASL authentication configuration
@@ -168,6 +171,13 @@ func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
 	return func(c *ProducerConfig) {
 		c.Tracing = tracing
 	}
+}
+
+// ProducerWithRawConfig merges raw librdkafka producer configuration keys,
+// overriding anything the library itself set. Use it for keys this library
+// does not model (e.g. "linger.ms", "queue.buffering.max.messages").
+func ProducerWithRawConfig(raw map[string]any) ProducerOption {
+	return func(c *ProducerConfig) { c.Raw = raw }
 }
 
 // ==================== Default Configs ====================

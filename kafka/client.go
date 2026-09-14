@@ -3,7 +3,6 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,51 +36,10 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 		return nil, fmt.Errorf("brokers are required")
 	}
 
-	// Build kafka config map
-	configMap := &ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(config.Brokers, ","),
-		"acks":              int(config.Acks),
-	}
+	// Build kafka config map (connection/auth via the connConfig seam)
+	configMap := buildProducerConfig(config)
 
-	if config.ClientID != "" {
-		configMap.SetKey("client.id", config.ClientID)
-	}
-
-	if config.ConnectionTimeout > 0 {
-		configMap.SetKey("socket.connection.setup.timeout.ms", int(config.ConnectionTimeout.Milliseconds()))
-	}
-
-	if config.RequestTimeout > 0 {
-		configMap.SetKey("request.timeout.ms", int(config.RequestTimeout.Milliseconds()))
-	}
-
-	if config.Compression != CompressionNone {
-		configMap.SetKey("compression.type", getCompressionName(config.Compression))
-	}
-
-	if config.Idempotent {
-		configMap.SetKey("enable.idempotence", true)
-	}
-
-	if config.SSL {
-		configMap.SetKey("security.protocol", "ssl")
-	}
-
-	if config.SASL != nil {
-		if config.SSL {
-			configMap.SetKey("security.protocol", "sasl_ssl")
-		} else {
-			configMap.SetKey("security.protocol", "sasl_plaintext")
-		}
-		configMap.SetKey("sasl.mechanism", config.SASL.Mechanism)
-		configMap.SetKey("sasl.username", config.SASL.Username)
-		configMap.SetKey("sasl.password", config.SASL.Password)
-	}
-
-	// Set log level
-	configMap.SetKey("log_level", int(config.LogLevel))
-
-	producer, err := ckafka.NewProducer(configMap)
+	producer, err := ckafka.NewProducer(&configMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create producer: %w", err)
 	}

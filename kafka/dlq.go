@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,14 +20,13 @@ type DLQService struct {
 	closed   int32 // atomic: 0=open, 1=closed
 }
 
-// NewDLQService creates a new DLQ service
-func NewDLQService(brokers []string, config *DLQConfig, metrics *DLQMetricsCollector, logger Logger) (*DLQService, error) {
-	configMap := &ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(brokers, ","),
-		"acks":              -1, // All replicas
-	}
+// newDLQService creates a new DLQ service. It builds its producer from the
+// same connConfig as the parent consumer, so SSL/SASL is never dropped.
+func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector, logger Logger) (*DLQService, error) {
+	cm := cc.configMap()
+	cm["acks"] = -1 // All replicas
 
-	producer, err := ckafka.NewProducer(configMap)
+	producer, err := ckafka.NewProducer(&cm)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DLQ producer: %w", err)
 	}

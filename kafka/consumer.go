@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,50 +65,10 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		return nil, fmt.Errorf("at least one topic is required")
 	}
 
-	// Build kafka config map
-	configMap := &ckafka.ConfigMap{
-		"bootstrap.servers":  strings.Join(config.Brokers, ","),
-		"group.id":           config.GroupID,
-		"auto.offset.reset":  getOffsetReset(config.FromBeginning),
-		"enable.auto.commit": config.AutoCommit,
-	}
+	// Build kafka config map (connection/auth via the connConfig seam)
+	configMap := buildConsumerConfig(config)
 
-	if config.SessionTimeout > 0 {
-		configMap.SetKey("session.timeout.ms", int(config.SessionTimeout.Milliseconds()))
-	}
-
-	if config.HeartbeatInterval > 0 {
-		configMap.SetKey("heartbeat.interval.ms", int(config.HeartbeatInterval.Milliseconds()))
-	}
-
-	if config.AutoCommitInterval > 0 {
-		configMap.SetKey("auto.commit.interval.ms", int(config.AutoCommitInterval.Milliseconds()))
-	}
-
-	if config.PartitionAssignor != "" {
-		configMap.SetKey("partition.assignment.strategy", string(config.PartitionAssignor))
-	}
-
-	// SSL/SASL configuration
-	if config.SSL {
-		configMap.SetKey("security.protocol", "ssl")
-	}
-
-	if config.SASL != nil {
-		if config.SSL {
-			configMap.SetKey("security.protocol", "sasl_ssl")
-		} else {
-			configMap.SetKey("security.protocol", "sasl_plaintext")
-		}
-		configMap.SetKey("sasl.mechanism", config.SASL.Mechanism)
-		configMap.SetKey("sasl.username", config.SASL.Username)
-		configMap.SetKey("sasl.password", config.SASL.Password)
-	}
-
-	// Set log level
-	configMap.SetKey("log_level", int(config.LogLevel))
-
-	consumer, err := ckafka.NewConsumer(configMap)
+	consumer, err := ckafka.NewConsumer(&configMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consumer: %w", err)
 	}
@@ -141,7 +100,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 
 	// Initialize DLQ service if configured
 	if config.DLQ != nil {
-		kc.dlqService, err = NewDLQService(config.Brokers, config.DLQ, kc.dlqMetrics, logger)
+		kc.dlqService, err = newDLQService(config.conn(), config.DLQ, kc.dlqMetrics, logger)
 		if err != nil {
 			consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)
@@ -600,14 +559,12 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 		groupID = fmt.Sprintf("%s-retry-consumer", dlqTopic)
 	}
 
-	configMap := &ckafka.ConfigMap{
-		"bootstrap.servers":  strings.Join(c.config.Brokers, ","),
-		"group.id":           groupID,
-		"auto.offset.reset":  getOffsetReset(retryConfig.FromBeginning),
-		"enable.auto.commit": true,
-	}
+	cm := c.config.conn().configMap()
+	cm["group.id"] = groupID
+	cm["auto.offset.reset"] = getOffsetReset(retryConfig.FromBeginning)
+	cm["enable.auto.commit"] = false // Task 10 makes commit-after-success explicit
 
-	dlqConsumer, err := ckafka.NewConsumer(configMap)
+	dlqConsumer, err := ckafka.NewConsumer(&cm)
 	if err != nil {
 		c.logger.Error("Failed to create DLQ retry consumer: %v", err)
 		return
