@@ -1,8 +1,10 @@
+// Command rebalance demonstrates a consumer that tracks per-partition state
+// across rebalances and commits offsets manually.
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
 	"os"
@@ -107,7 +109,6 @@ func main() {
 
 					// Example: Load checkpoint from external store
 					// checkpoint := loadCheckpoint(tp.Topic, tp.Partition)
-					// consumer.Seek(tp, checkpoint)
 				}
 				log.Println("===========================")
 
@@ -135,7 +136,7 @@ func main() {
 	}
 
 	// Register message handler
-	consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
+	consumer.OnMessage(func(_ context.Context, msg *kafka.Message) error {
 		// Get partition state
 		state := partitionManager.GetOrCreate(msg.Topic, msg.Partition)
 
@@ -147,6 +148,12 @@ func main() {
 
 		log.Printf("Received: topic=%s partition=%d offset=%d key=%s (buffer=%d)",
 			msg.Topic, msg.Partition, msg.Offset, string(msg.Key), bufferSize)
+
+		// With ConsumerWithAutoCommit(false) the library never stores offsets
+		// on its own — commit explicitly once the message is durably handled.
+		if err := consumer.Commit(msg); err != nil {
+			return err
+		}
 
 		// Flush when buffer is full
 		if bufferSize >= 10 {
@@ -175,7 +182,7 @@ func main() {
 	log.Println("")
 	log.Println("Press Ctrl+C to stop")
 
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("Consumer error: %v", err)
 	}
 
@@ -188,23 +195,4 @@ func main() {
 	}
 
 	log.Println("Consumer stopped")
-}
-
-// Example: Checkpoint management functions (implement based on your storage)
-func loadCheckpoint(topic string, partition int32) int64 {
-	// Load from Redis, database, or file
-	// return storedOffset
-	return -1 // -1 means use Kafka's stored offset
-}
-
-func saveCheckpoint(topic string, partition int32, offset int64) {
-	// Save to Redis, database, or file
-	data := map[string]interface{}{
-		"topic":     topic,
-		"partition": partition,
-		"offset":    offset,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-	jsonData, _ := json.Marshal(data)
-	log.Printf("Saving checkpoint: %s", string(jsonData))
 }

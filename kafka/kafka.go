@@ -1,9 +1,13 @@
-// Package kafka provides a production-ready Kafka client and consumer library
-// built on top of confluent-kafka-go.
+// Package kafka provides a production-ready Kafka producer and consumer
+// library built on top of confluent-kafka-go.
 //
 // Features:
 //   - High-performance producer with Produce(), ProduceBatch(), ProduceAsync() methods
-//   - Handler-based consumer with auto-discovery and registration
+//   - Handler-based consumer with single-message, batch, and key-grouped dispatch
+//   - At-least-once delivery: offsets are stored only when a message is parked
+//     (processed, confirmed to the DLQ, or claimed by the error handler)
+//   - Unparkable messages block their partition with escalating backoff
+//     instead of being dropped; SkipOnMaxRetries is the explicit loss opt-in
 //   - Intelligent batch processing with configurable size and timeout
 //   - Key-based grouping within batches for ordered processing
 //   - In-memory idempotency with TTL
@@ -44,4 +48,4 @@
 package kafka
 
 // Version of the library
-const Version = "1.0.0"
+const Version = "1.1.0"

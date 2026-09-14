@@ -1,3 +1,5 @@
+// Command health serves HTTP endpoints reporting Kafka broker, topic, and
+// consumer-lag health.
 package main
 
 import (
@@ -16,7 +18,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create health checker: %v", err)
 	}
-	defer healthChecker.Close()
+	defer func() { _ = healthChecker.Close() }()
 
 	// Set custom timeout
 	healthChecker.SetTimeout(5 * time.Second)
@@ -32,7 +34,7 @@ func main() {
 		if result.Status != kafka.HealthStatusUp {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 
 	// Broker connectivity check endpoint
@@ -46,7 +48,7 @@ func main() {
 		if result.Status != kafka.HealthStatusUp {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 
 	// Topic health check endpoint
@@ -54,7 +56,7 @@ func main() {
 		topic := r.URL.Query().Get("topic")
 		if topic == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "topic query param required",
 			})
 			return
@@ -69,7 +71,7 @@ func main() {
 		if result.Status != kafka.HealthStatusUp {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 
 	// Consumer lag check endpoint
@@ -77,7 +79,7 @@ func main() {
 		groupID := r.URL.Query().Get("group")
 		if groupID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "group query param required",
 			})
 			return
@@ -93,7 +95,7 @@ func main() {
 		if result.Status != kafka.HealthStatusUp {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 
 	// Readiness endpoint (for Kubernetes)
@@ -105,17 +107,17 @@ func main() {
 
 		if result.Status == kafka.HealthStatusUp {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
+			_, _ = w.Write([]byte("OK"))
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("NOT READY"))
+			_, _ = w.Write([]byte("NOT READY"))
 		}
 	})
 
 	// Liveness endpoint (for Kubernetes)
-	http.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	log.Println("Starting health check server on :8080")

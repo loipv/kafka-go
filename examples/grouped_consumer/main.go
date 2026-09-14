@@ -1,8 +1,10 @@
+// Command grouped_consumer demonstrates key-grouped batch consumption.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
 	"os"
@@ -47,7 +49,7 @@ func main() {
 
 	// Register grouped batch handler
 	// Messages are grouped by key (customer ID in this case)
-	consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) error {
+	consumer.OnGroupedBatch(func(_ context.Context, groups []kafka.GroupedBatch) error {
 		log.Printf("Processing %d customer groups", len(groups))
 
 		for _, group := range groups {
@@ -92,7 +94,7 @@ func main() {
 	log.Println("Messages with the same key will be grouped together")
 	log.Println("Press Ctrl+C to stop")
 
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("Consumer error: %v", err)
 	}
 

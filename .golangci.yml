@@ -9,3 +9,10 @@ linters:
     - errorlint
     - copyloopvar
     - nilerr
+  exclusions:
+    rules:
+      # Test files: `defer x.Close()` and fire-and-forget Start in teardown
+      # scaffolding is intentional — checking every one is noise, not signal.
+      - path: _test\.go
+        linters:
+          - errcheck

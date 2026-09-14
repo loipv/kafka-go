@@ -211,7 +211,7 @@ func (p *Producer) Close() error {
 }
 
 // buildKafkaMessage builds a ckafka.Message from Message
-func (c *Producer) buildKafkaMessage(topic string, msg *Message) *ckafka.Message {
+func (p *Producer) buildKafkaMessage(topic string, msg *Message) *ckafka.Message {
 	kafkaMsg := &ckafka.Message{
 		TopicPartition: ckafka.TopicPartition{
 			Topic:     &topic,

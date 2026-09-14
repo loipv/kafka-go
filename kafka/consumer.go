@@ -124,7 +124,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	if config.DLQ != nil {
 		kc.dlqService, err = newDLQService(config.conn(), config.DLQ, kc.metrics)
 		if err != nil {
-			consumer.Close()
+			_ = consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)
 		}
 
@@ -203,7 +203,8 @@ func (c *Consumer) Start(ctx context.Context) error {
 			msg, err := c.consumer.ReadMessage(100 * time.Millisecond)
 			if err != nil {
 				// Timeout is normal, continue
-				if ke, ok := err.(ckafka.Error); ok && ke.Code() == ckafka.ErrTimedOut {
+				var ke ckafka.Error
+				if errors.As(err, &ke) && ke.Code() == ckafka.ErrTimedOut {
 					continue
 				}
 				// Log other errors but continue
@@ -256,7 +257,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 
 	// Close DLQ service
 	if c.dlqService != nil {
-		c.dlqService.Close()
+		_ = c.dlqService.Close()
 	}
 
 	// Close idempotency store
@@ -378,7 +379,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	}
 
 	// Execute handler with retry
-	err, attempts := c.executeWithRetry(ctx, msg)
+	attempts, err := c.executeWithRetry(ctx, msg)
 
 	if err == nil {
 		if endSpan != nil {
@@ -433,7 +434,7 @@ func (c *Consumer) invokeHandler(ctx context.Context, msg *Message) error {
 
 // executeWithRetry executes the handler with retry logic. The returned
 // attempts count handler invocations (1 = first try, no retry).
-func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, int) {
+func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, error) {
 	maxRetries := DefaultRetryMaxRetries
 	initialInterval := DefaultRetryInitialInterval
 	multiplier := DefaultRetryMultiplier
@@ -462,7 +463,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err := c.invokeHandler(ctx, msg)
 		if err == nil {
-			return nil, attempt + 1
+			return attempt + 1, nil
 		}
 
 		lastErr = err
@@ -472,7 +473,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
 			select {
 			case <-ctx.Done():
-				return ctx.Err(), attempt + 1
+				return attempt + 1, ctx.Err()
 			case <-c.after(delay):
 				delay = time.Duration(float64(delay) * multiplier)
 				if delay > maxInterval {
@@ -484,9 +485,9 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (error, i
 
 	if skipOnMaxRetries {
 		c.logger.Warn("max retries exceeded — skipping message", "error", lastErr)
-		return fmt.Errorf("%w: %v", ErrSkippedOnMaxRetries, lastErr), maxRetries + 1
+		return maxRetries + 1, fmt.Errorf("%w: %w", ErrSkippedOnMaxRetries, lastErr)
 	}
-	return lastErr, maxRetries + 1
+	return maxRetries + 1, lastErr
 }
 
 // handleError parks or blocks a failed message: the error handler can claim
@@ -707,7 +708,7 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 		c.logger.Error("failed to create dlq retry consumer", "error", err)
 		return
 	}
-	defer dlqConsumer.Close()
+	defer func() { _ = dlqConsumer.Close() }()
 
 	if err := dlqConsumer.Subscribe(dlqTopic, nil); err != nil {
 		c.logger.Error("failed to subscribe to dlq topic", "error", err)
@@ -725,7 +726,8 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 		default:
 			msg, err := dlqConsumer.ReadMessage(100 * time.Millisecond)
 			if err != nil {
-				if kafkaErr, ok := err.(ckafka.Error); ok && kafkaErr.Code() == ckafka.ErrTimedOut {
+				var kafkaErr ckafka.Error
+				if errors.As(err, &kafkaErr) && kafkaErr.Code() == ckafka.ErrTimedOut {
 					continue
 				}
 				c.logger.Warn("dlq consumer error", "error", err)
@@ -860,7 +862,8 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 			if !c.config.AutoCommit {
 				if _, err := consumer.Commit(); err != nil {
 					// Ignore "no offset stored" errors
-					if ke, ok := err.(ckafka.Error); !ok || ke.Code() != ckafka.ErrNoOffset {
+					var ke ckafka.Error
+					if !errors.As(err, &ke) || ke.Code() != ckafka.ErrNoOffset {
 						c.logger.Warn("failed to commit offsets during rebalance", "error", err)
 					}
 				}
@@ -919,7 +922,7 @@ type blockState struct {
 // The poll loop keeps running — other partitions flow normally.
 // ponytail: per-poll linear scan of c.blocked — fine for hundreds of
 // partitions; index by time if it ever isn't.
-func (c *Consumer) blockMessages(ctx context.Context, msgs []*Message) {
+func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 	if len(msgs) == 0 {
 		return
 	}
@@ -1067,16 +1070,16 @@ func convertPartitions(ps []ckafka.TopicPartition) []TopicPartition {
 // to the max offset per (topic, partition) and storing offset+1 — committing
 // offset N would re-deliver message N on every restart.
 func commitOffsets(msgs []*Message) []ckafka.TopicPartition {
-	max := make(map[TopicPartition]int64, len(msgs))
+	maxOffsets := make(map[TopicPartition]int64, len(msgs))
 	for _, m := range msgs {
 		tp := TopicPartition{Topic: m.Topic, Partition: m.Partition}
 		// The ok-check matters: Kafka offsets start at 0, and 0 > 0 is false.
-		if cur, ok := max[tp]; !ok || m.Offset > cur {
-			max[tp] = m.Offset
+		if cur, ok := maxOffsets[tp]; !ok || m.Offset > cur {
+			maxOffsets[tp] = m.Offset
 		}
 	}
-	out := make([]ckafka.TopicPartition, 0, len(max))
-	for tp, off := range max {
+	out := make([]ckafka.TopicPartition, 0, len(maxOffsets))
+	for tp, off := range maxOffsets {
 		topic := tp.Topic
 		out = append(out, ckafka.TopicPartition{
 			Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(off + 1),

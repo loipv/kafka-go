@@ -27,7 +27,7 @@ func TestExecuteWithRetryCapsDelay(t *testing.T) {
 	c.OnMessage(func(context.Context, *Message) error { return errors.New("boom") })
 
 	start := time.Now()
-	_, attempts := c.executeWithRetry(context.Background(), &Message{Topic: "t"})
+	attempts, _ := c.executeWithRetry(context.Background(), &Message{Topic: "t"})
 	elapsed := time.Since(start)
 
 	if attempts != 6 {
@@ -91,7 +91,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 				}
 				return nil
 			}
-			_, attempts := c.executeWithRetry(context.Background(), &Message{})
+			attempts, _ := c.executeWithRetry(context.Background(), &Message{})
 			if len(delays) != len(tt.wantDelays) {
 				t.Fatalf("delays = %v, want %v", delays, tt.wantDelays)
 			}
@@ -113,12 +113,12 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 
 func TestExecuteWithRetryContextCancel(t *testing.T) {
 	c := &Consumer{config: &ConsumerConfig{Retry: &RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}},
-		after:   func(d time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
+		after:   func(_ time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
 		metrics: NewDLQMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, attempts := c.executeWithRetry(ctx, &Message{}); attempts == 0 {
+	if attempts, _ := c.executeWithRetry(ctx, &Message{}); attempts == 0 {
 		t.Error("expected at least one attempt before ctx cancellation")
 	}
 }

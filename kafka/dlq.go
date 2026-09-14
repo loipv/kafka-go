@@ -181,13 +181,14 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	cb.successes++
 
-	if cb.state == CircuitHalfOpen {
+	switch cb.state {
+	case CircuitHalfOpen:
 		if cb.successes >= cb.config.SuccessThreshold {
 			cb.state = CircuitClosed
 			cb.failures = 0
 			cb.successes = 0
 		}
-	} else if cb.state == CircuitClosed {
+	case CircuitClosed:
 		// Reset failures on success
 		cb.failures = 0
 	}
@@ -201,11 +202,12 @@ func (cb *CircuitBreaker) RecordFailure() {
 	cb.failures++
 	cb.lastFailureTime = cb.now()
 
-	if cb.state == CircuitClosed {
+	switch cb.state {
+	case CircuitClosed:
 		if cb.failures >= cb.config.FailureThreshold {
 			cb.state = CircuitOpen
 		}
-	} else if cb.state == CircuitHalfOpen {
+	case CircuitHalfOpen:
 		// Any failure in half-open goes back to open
 		cb.state = CircuitOpen
 		cb.successes = 0

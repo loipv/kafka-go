@@ -1,8 +1,11 @@
+// Command typed_consumer demonstrates generic typed handlers with JSON
+// decoding. Set EXAMPLE=batch or EXAMPLE=grouped to run the other variants.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -172,13 +175,13 @@ func WithGroupedBatchDecoder[T any](
 // Example Handlers
 // ============================================================
 
-func processOrder(ctx context.Context, order Order, msg *kafka.Message) error {
+func processOrder(_ context.Context, order Order, _ *kafka.Message) error {
 	log.Printf("Processing order: %s, customer: %s, amount: %.2f",
 		order.OrderID, order.Customer, order.Amount)
 	return nil
 }
 
-func processOrders(ctx context.Context, orders []Order, msgs []*kafka.Message) error {
+func processOrders(_ context.Context, orders []Order, _ []*kafka.Message) error {
 	log.Printf("Processing %d orders", len(orders))
 	for _, order := range orders {
 		log.Printf("  - Order %s: %.2f", order.OrderID, order.Amount)
@@ -187,7 +190,7 @@ func processOrders(ctx context.Context, orders []Order, msgs []*kafka.Message) e
 	return nil
 }
 
-func processOrdersByCustomer(ctx context.Context, groups []TypedGroupedBatch[Order]) error {
+func processOrdersByCustomer(_ context.Context, groups []TypedGroupedBatch[Order]) error {
 	for _, group := range groups {
 		total := 0.0
 		for _, order := range group.Values {
@@ -209,14 +212,15 @@ func main() {
 		brokers = "localhost:9092"
 	}
 
-	// Example 1: Single message with typed handler
-	example1SingleMessage(brokers)
-
-	// Example 2: Batch processing with typed handler
-	// example2BatchProcessing(brokers)
-
-	// Example 3: Grouped batch with typed handler
-	// example3GroupedBatch(brokers)
+	// Pick a variant: default single-message; EXAMPLE=batch or EXAMPLE=grouped
+	switch os.Getenv("EXAMPLE") {
+	case "batch":
+		example2BatchProcessing(brokers)
+	case "grouped":
+		example3GroupedBatch(brokers)
+	default:
+		example1SingleMessage(brokers)
+	}
 }
 
 func example1SingleMessage(brokers string) {
@@ -244,11 +248,11 @@ func example1SingleMessage(brokers string) {
 	}()
 
 	log.Println("Starting typed consumer...")
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
 
-	consumer.Close(context.Background())
+	_ = consumer.Close(context.Background())
 }
 
 func example2BatchProcessing(brokers string) {
@@ -279,11 +283,11 @@ func example2BatchProcessing(brokers string) {
 	}()
 
 	log.Println("Starting typed batch consumer...")
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
 
-	consumer.Close(context.Background())
+	_ = consumer.Close(context.Background())
 }
 
 func example3GroupedBatch(brokers string) {
@@ -312,9 +316,9 @@ func example3GroupedBatch(brokers string) {
 	}()
 
 	log.Println("Starting typed grouped consumer...")
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
 
-	consumer.Close(context.Background())
+	_ = consumer.Close(context.Background())
 }

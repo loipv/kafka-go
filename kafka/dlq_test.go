@@ -82,7 +82,7 @@ func TestIdempotencyStore(t *testing.T) {
 			t.Error("IsDuplicate(k) = false with clamped ttl")
 		}
 	})
-	t.Run("double close does not panic", func(t *testing.T) {
+	t.Run("double close does not panic", func(_ *testing.T) {
 		s := NewIdempotencyStore(time.Minute)
 		s.Close()
 		s.Close() // used to panic: close of closed channel

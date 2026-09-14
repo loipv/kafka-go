@@ -1,3 +1,5 @@
+// Command producer demonstrates single, batch, and multi-topic producing
+// with graceful shutdown.
 package main
 
 import (
@@ -23,8 +25,8 @@ type Order struct {
 }
 
 func main() {
-	// Create Kafka client with all common options
-	client, err := kafka.NewProducer(
+	// Create Kafka producer with all common options
+	producer, err := kafka.NewProducer(
 		kafka.ProducerWithBrokers("localhost:9092"),
 		kafka.ProducerWithClientID("order-producer"),
 		kafka.ProducerWithAcks(kafka.AcksAll),
@@ -37,9 +39,9 @@ func main() {
 		}),
 	)
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		log.Fatalf("Failed to create producer: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = producer.Close() }()
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,7 +73,7 @@ func main() {
 
 		data, _ := json.Marshal(order)
 
-		err := client.Produce(ctx, "orders", &kafka.Message{
+		err := producer.Produce(ctx, "orders", &kafka.Message{
 			Key:   []byte(order.CustomerID),
 			Value: data,
 			Headers: kafka.Headers{
@@ -109,7 +111,7 @@ func main() {
 		}
 	}
 
-	if err := client.ProduceBatch(ctx, "orders", batchOrders); err != nil {
+	if err := producer.ProduceBatch(ctx, "orders", batchOrders); err != nil {
 		log.Printf("Failed to send batch: %v", err)
 	} else {
 		log.Println("Batch sent successfully!")
@@ -132,14 +134,14 @@ func main() {
 		},
 	}
 
-	if err := client.ProduceMultiTopicBatch(ctx, multiTopicBatch); err != nil {
+	if err := producer.ProduceMultiTopicBatch(ctx, multiTopicBatch); err != nil {
 		log.Printf("Failed to send multi-topic batch: %v", err)
 	} else {
 		log.Println("Multi-topic batch sent successfully!")
 	}
 
 	// Flush remaining messages
-	if err := client.Flush(10 * time.Second); err != nil {
+	if err := producer.Flush(10 * time.Second); err != nil {
 		log.Printf("Flush error: %v", err)
 	}
 

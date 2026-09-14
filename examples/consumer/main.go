@@ -1,8 +1,11 @@
+// Command consumer demonstrates batch consumption with DLQ, DLQ retry,
+// idempotency, and tracing.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
 	"os"
@@ -95,7 +98,7 @@ func main() {
 	}
 
 	// Register batch handler
-	consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
+	consumer.OnBatch(func(_ context.Context, msgs []*kafka.Message) error {
 		log.Printf("Processing batch of %d messages", len(msgs))
 
 		for _, msg := range msgs {
@@ -127,7 +130,7 @@ func main() {
 	log.Println("Starting consumer...")
 	log.Println("Press Ctrl+C to stop")
 
-	if err := consumer.Start(ctx); err != nil && err != context.Canceled {
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("Consumer error: %v", err)
 	}
 

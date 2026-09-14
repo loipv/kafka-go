@@ -2,6 +2,7 @@ package kafka
 
 import "errors"
 
+// Sentinel errors returned by the library. Assert on them with errors.Is.
 var (
 	ErrProducerClosed      = errors.New("producer is closed")
 	ErrConsumerClosed      = errors.New("consumer is closed")

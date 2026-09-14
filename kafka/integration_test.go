@@ -344,7 +344,7 @@ func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *captureHandler) WithGroup(string) slog.Handler       { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
 
 // rebalanceFailures returns Warn+ lines mentioning rebalance/assign — the
 // "partitions assigned/revoked" Info logs never match.

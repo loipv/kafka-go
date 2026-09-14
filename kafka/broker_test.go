@@ -41,7 +41,7 @@ func TestProduceAsyncDeliveryErrorHandler(t *testing.T) {
 	p, err := NewProducer(
 		ProducerWithBrokers(mc.BootstrapServers()),
 		ProducerWithRawConfig(map[string]any{"message.timeout.ms": 5000}),
-		ProducerWithDeliveryErrorHandler(func(msg *Message, err error) { errs <- err }),
+		ProducerWithDeliveryErrorHandler(func(_ *Message, err error) { errs <- err }),
 	)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)

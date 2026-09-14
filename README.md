@@ -1,9 +1,10 @@
 # kafka-go
 
-A production-ready Go library for Kafka client and consumer functionality built on top of [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go). This library provides enterprise-grade features including intelligent batch processing, idempotency guarantees, key-based grouping, and automatic pressure management.
+A production-ready Go library for Kafka producer and consumer functionality built on top of [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go). This library provides enterprise-grade features including at-least-once delivery, intelligent batch processing, idempotency guarantees, key-based grouping, and a Dead Letter Queue with circuit breaker.
 
 ## Features
 
+- **At-least-once delivery**: Offsets advance only for parked messages; unparkable messages block their partition instead of being dropped
 - **Producer**: High-performance Kafka producer with `Produce()`, `ProduceBatch()`, `ProduceAsync()` methods
 - **Consumer**: Handler-based consumer with auto-discovery and registration
 - **Batch Processing**: Intelligent batching with configurable size and timeout
@@ -51,9 +52,10 @@ go get go.opentelemetry.io/otel/sdk/trace
 kafka-go/
 ├── kafka/                     # Library code
 │   ├── kafka.go              # Package documentation
-│   ├── types.go              # Core types and interfaces
-│   ├── options.go            # Client (Producer) configuration options
-│   ├── consumer_options.go   # Consumer configuration options
+│   ├── types.go              # Core types and enums
+│   ├── options.go            # Producer options (ProducerWith*)
+│   ├── consumer_options.go   # Consumer options (ConsumerWith*)
+│   ├── config.go             # connConfig seam shared by all internal clients
 │   ├── client.go             # Producer implementation
 │   ├── consumer.go           # Consumer implementation
 │   ├── dlq.go                # DLQ, Circuit Breaker, Idempotency
@@ -66,15 +68,18 @@ kafka-go/
 │   ├── grouped_consumer/     # Key-based grouping
 │   ├── typed_consumer/       # Generic typed handlers with JSON decoding
 │   ├── health/               # Health check server
-│   └── rebalance/            # Rebalance callback example
+│   └── rebalance/            # Rebalance callback + manual commit
+├── .github/workflows/        # CI (test, lint, integration, darwin)
 ├── go.mod
 ├── go.sum
+├── Makefile
+├── CHANGELOG.md
 └── README.md
 ```
 
 ## Quick Start
 
-### 1. Create Kafka Client (Producer)
+### 1. Create a Producer
 
 ```go
 package main
@@ -87,18 +92,18 @@ import (
 )
 
 func main() {
-    // Create client with options
-    client, err := kafka.NewProducer(
+    // Create producer with options
+    producer, err := kafka.NewProducer(
         kafka.ProducerWithBrokers("localhost:9092"),
         kafka.ProducerWithClientID("my-app"),
     )
     if err != nil {
         log.Fatal(err)
     }
-    defer client.Close()
+    defer producer.Close()
 
     // Produce a message
-    err = client.Produce(context.Background(), "orders", &kafka.Message{
+    err = producer.Produce(context.Background(), "orders", &kafka.Message{
         Key:   []byte("customer-123"),
         Value: []byte(`{"orderId": "123", "amount": 100}`),
     })
@@ -169,10 +174,10 @@ consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
 
 ## Configuration
 
-### Client Options
+### Producer Options
 
 ```go
-client, err := kafka.NewProducer(
+producer, err := kafka.NewProducer(
     // Required
     kafka.ProducerWithBrokers("localhost:9092", "localhost:9093"),
     kafka.ProducerWithClientID("my-app"),
@@ -210,6 +215,11 @@ client, err := kafka.NewProducer(
         Enabled:       true,
         TracerName:    "my-kafka-service",
         TracerVersion: "1.0.0",
+    }),
+
+    // Optional - Raw librdkafka config keys, merged last
+    kafka.ProducerWithRawConfig(map[string]any{
+        "linger.ms": 5,
     }),
 )
 ```
@@ -284,8 +294,14 @@ consumer, err := kafka.NewConsumer(
     kafka.ConsumerWithRetry(&kafka.RetryConfig{
         MaxRetries:            3,
         InitialInterval:       1*time.Second,
+        MaxInterval:           30*time.Second,
         Multiplier:            2.0,
         SkipOnMaxRetries:      false,
+    }),
+
+    // Optional - Raw librdkafka config keys, merged last
+    kafka.ConsumerWithRawConfig(map[string]any{
+        "queued.max.messages.kbytes": 64,
     }),
 )
 ```
@@ -427,13 +443,59 @@ consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
 })
 ```
 
+## Delivery Guarantees
+
+Delivery is **at-least-once by default**. The consumer sets
+`enable.auto.offset.store=false` and stores an offset only when the message is
+genuinely parked — auto-commit then commits what you *finished*, not what you
+*read*:
+
+| Outcome | Offset stored? |
+|---------|----------------|
+| Handler succeeded | Yes |
+| Written to DLQ, delivery report confirmed | Yes |
+| `ErrorHandler` returned `nil` (user took ownership) | Yes |
+| `SkipOnMaxRetries = true` | Yes — the one explicit opt-in to loss |
+| No DLQ configured · DLQ send failed · circuit breaker open | **No — partition blocks** |
+
+**Blocked partitions.** A message that cannot be parked (failing handler, no
+DLQ, or the DLQ itself is down) does not get dropped: its partition is paused,
+seeked back to the message's offset, and retried with escalating backoff
+(`RetryConfig.InitialInterval`, doubling per consecutive block, capped at
+`MaxInterval`, default 30s). Other partitions keep flowing, the poll loop never
+sleeps, and a transient DLQ outage self-heals without operator action. Entering
+the blocked state logs a WARN naming topic/partition/offset, and
+`DLQMetrics().BlockedPartitions` exposes the currently-blocked set as a gauge.
+
+**Batch mode.** If a batch handler fails, no offset from the batch is stored —
+the whole batch is re-delivered. Messages that did succeed may therefore be
+processed twice; that is what `ConsumerWithIdempotencyKey` is for.
+
+**Skipping instead of blocking.** Set `RetryConfig.SkipOnMaxRetries: true` to
+restore the old lossy behavior: after max retries the error handler fires, the
+DLQ (if configured) receives the message, and the offset advances.
+
+**Producer side.** `Produce`/`ProduceBatch`/`ProduceMultiTopicBatch` are
+synchronous and return errors. `ProduceAsync` cannot — a failed delivery is
+reported through the handler registered with `ProducerWithDeliveryErrorHandler`:
+
+```go
+producer, err := kafka.NewProducer(
+    kafka.ProducerWithBrokers("localhost:9092"),
+    kafka.ProducerWithDeliveryErrorHandler(func(msg *kafka.Message, err error) {
+        // Persist or re-queue — without this, async delivery failures are only logged
+        log.Printf("delivery failed for topic=%s key=%s: %v", msg.Topic, msg.Key, err)
+    }),
+)
+```
+
 ## Producer API
 
-### Client Methods
+### Producer Methods
 
 ```go
 // Produce single message
-err := client.Produce(ctx, "topic", &kafka.Message{
+err := producer.Produce(ctx, "topic", &kafka.Message{
     Key:   []byte("message-key"),
     Value: []byte(`{"data": "value"}`),
     Headers: kafka.Headers{
@@ -442,29 +504,28 @@ err := client.Produce(ctx, "topic", &kafka.Message{
 })
 
 // Produce batch to single topic
-err := client.ProduceBatch(ctx, "topic", []*kafka.Message{
+err := producer.ProduceBatch(ctx, "topic", []*kafka.Message{
     {Key: []byte("key1"), Value: []byte("value1")},
     {Key: []byte("key2"), Value: []byte("value2")},
 })
 
 // Produce to multiple topics
-err := client.ProduceMultiTopicBatch(ctx, []kafka.TopicBatch{
+err := producer.ProduceMultiTopicBatch(ctx, []kafka.TopicBatch{
     {Topic: "topic1", Messages: []*kafka.Message{{Value: []byte("msg1")}}},
     {Topic: "topic2", Messages: []*kafka.Message{{Value: []byte("msg2")}}},
 })
 
-// Queue message for auto-batching
-err := client.ProduceAsync(ctx, "topic", &kafka.Message{Value: []byte("message")})
+// Produce without waiting for the delivery report (librdkafka batches internally)
+err := producer.ProduceAsync("topic", &kafka.Message{Value: []byte("message")})
 ```
 
 ### Message Options
 
 ```go
-// Produce with specific partition
-err := client.Produce(ctx, "topic", &kafka.Message{
+// Partitioning is by Key — the producer ignores Message.Partition
+err := producer.Produce(ctx, "topic", &kafka.Message{
     Key:       []byte("key"),
     Value:     []byte("value"),
-    Partition: kafka.PartitionAny, // or specific partition number
     Timestamp: time.Now(),
     Headers: kafka.Headers{
         "custom-header": []byte("value"),
@@ -477,8 +538,12 @@ err := client.Produce(ctx, "topic", &kafka.Message{
 Built-in health check indicators:
 
 ```go
-// Create health checker
-health := kafka.NewHealthCheckerWithBrokers([]string{"localhost:9092"})
+// Create health checker (owns a producer; Close it when done)
+health, err := kafka.NewHealthChecker(kafka.ProducerWithBrokers("localhost:9092"))
+if err != nil {
+    log.Fatal(err)
+}
+defer health.Close()
 
 // Check if Kafka is healthy
 result := health.Check(ctx)
@@ -533,7 +598,8 @@ http.HandleFunc("/health/kafka", func(w http.ResponseWriter, r *http.Request) {
 ### Enable Tracing
 
 ```go
-// Initialize OpenTelemetry (do this before creating Kafka client)
+// Initialize OpenTelemetry (optional — W3C trace-context propagation works
+// without any global setup; this wires an exporter)
 import (
     "go.opentelemetry.io/otel"
     "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -562,8 +628,8 @@ func initTracer() (*sdktrace.TracerProvider, error) {
     return tp, nil
 }
 
-// Create client with tracing enabled
-client, err := kafka.NewProducer(
+// Create producer with tracing enabled
+producer, err := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
     kafka.ProducerWithClientID("my-app"),
     kafka.ProducerWithTracing(&kafka.TracingConfig{
@@ -642,6 +708,7 @@ metrics := consumer.DLQMetrics()
 // {
 //   Global: {HandlerRetries: 10, MessagesSentToDLQ: 2, ReprocessAttempts: 5},
 //   ByTopic: {"orders": {HandlerRetries: 10, SentToDLQ: 2}},
+//   BlockedPartitions: [{Topic: "orders", Partition: 2}], // currently blocked
 // }
 ```
 
@@ -663,22 +730,24 @@ The library logs through `log/slog` (`*slog.Logger`). The default is
 `slog.Default()`; pass any `*slog.Logger` to customize:
 
 ```go
-// Use with client
-client, _ := kafka.NewProducer(
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+producer, err := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
-    kafka.ProducerWithLogger(slog.Default()),
+    kafka.ProducerWithLogger(logger),
 )
+```
 
+```go
 // Use with consumer
 consumer, _ := kafka.NewConsumer(
     kafka.ConsumerWithBrokers("localhost:9092"),
     kafka.ConsumerWithGroupID("my-group"),
     kafka.ConsumerWithTopics("orders"),
-    kafka.ConsumerWithLogger(slog.Default()),
+    kafka.ConsumerWithLogger(logger),
 )
 
 // Silence library logging entirely
-client, _ := kafka.NewProducer(
+producer, _ := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
     kafka.ProducerWithLogger(slog.New(slog.DiscardHandler)),
 )
@@ -718,11 +787,16 @@ if err := consumer.Close(shutdownCtx); err != nil {
 
 ### Custom Error Handler
 
+The error handler runs after retries are exhausted, before the DLQ. Its return
+value decides ownership: `nil` means you persisted the message yourself (the
+offset advances); any error defers to the DLQ / blocked-partition machinery.
+
 ```go
 consumer, _ := kafka.NewConsumer(
-    kafka.ConsumerWithErrorHandler(func(err error, msg *kafka.Message) {
+    kafka.ConsumerWithErrorHandler(func(ctx context.Context, msg *kafka.Message, err error) error {
         log.Printf("Error processing message: %v, key: %s", err, msg.Key)
         // Custom error handling logic
+        return err // or nil to claim ownership and advance the offset
     }),
     // ... other options
 )
@@ -732,10 +806,33 @@ consumer, _ := kafka.NewConsumer(
 
 | Scenario | Default Behavior |
 |----------|-----------------|
-| Handler returns error | Retry with exponential backoff |
-| Max retries exceeded (no DLQ) | Error logged, consumer continues |
-| Max retries exceeded (with DLQ) | Message sent to DLQ topic |
-| DLQ send fails | Circuit breaker may open |
+| Handler returns error | Retried with exponential backoff (`RetryConfig`) |
+| Max retries exceeded, DLQ configured | Message sent to DLQ (produce confirmed), offset stored |
+| Max retries exceeded, no DLQ | Partition blocks; message retried with escalating backoff |
+| `SkipOnMaxRetries: true` | Error handler fires, DLQ (if any) receives message, offset advances |
+| DLQ send fails / circuit breaker open | Partition blocks; retried until the DLQ recovers |
+
+## Testing
+
+The test suite runs in three tiers:
+
+| Tier | Covers | Needs Docker? |
+|------|--------|---------------|
+| Unit | Pure logic: config maps, retry math, tracing carriers, circuit breaker | No |
+| Mock broker | Send/consume round-trips, delivery reports, commit/resume, DLQ, blocked partitions, broker-down | No — `kafka.NewMockCluster` runs in-process |
+| Integration | SASL/TLS auth regression, cooperative rebalance with two consumers, real consumer lag | Yes — testcontainers + Redpanda |
+
+```bash
+make test              # unit + mock-broker tests
+make test-short        # unit only (skips the mock-broker tier)
+make test-race         # race detector
+make test-integration  # Redpanda container suite (requires Docker)
+```
+
+The integration tests live behind the `//go:build integration` build tag, so
+they are excluded from the default build graph — the Docker client is only
+pulled in when explicitly requested. CI runs the first two tiers on every PR
+and the integration tier on main.
 
 ## Examples
 
@@ -969,8 +1066,8 @@ type TopicPartition struct {
 // HealthResult represents health check result
 type HealthResult struct {
     Status  HealthStatus
-    Details map[string]interface{}
-    Error   error
+    Details map[string]any
+    Error   string // error message, empty when healthy
 }
 ```
 
