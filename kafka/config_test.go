@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"testing"
+	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
@@ -80,21 +81,25 @@ func TestAllBuildersPropagateAuth(t *testing.T) {
 	sasl := &SASLConfig{Mechanism: "SCRAM-SHA-256", Username: "u", Password: "p"}
 	builders := []struct {
 		name  string
-		build func() ckafka.ConfigMap
+		build func() (ckafka.ConfigMap, error)
 	}{
-		{"producer", func() ckafka.ConfigMap {
-			return buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"}, SSL: true, SASL: sasl})
+		{"producer", func() (ckafka.ConfigMap, error) {
+			return buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"}, SSL: true, SASL: sasl}), nil
 		}},
-		{"consumer", func() ckafka.ConfigMap {
+		{"consumer", func() (ckafka.ConfigMap, error) {
 			return buildConsumerConfig(&ConsumerConfig{Brokers: []string{"b:9092"}, GroupID: "g", Topics: []string{"t"}, SSL: true, SASL: sasl})
 		}},
-		{"dlq-and-health", func() ckafka.ConfigMap {
-			return connConfig{Brokers: []string{"b:9092"}, SSL: true, SASL: sasl}.configMap()
+		{"dlq-and-health", func() (ckafka.ConfigMap, error) {
+			return connConfig{Brokers: []string{"b:9092"}, SSL: true, SASL: sasl}.configMap(), nil
 		}},
 	}
 	for _, b := range builders {
 		t.Run(b.name, func(t *testing.T) {
-			v, err := b.build().Get("security.protocol", nil)
+			cm, err := b.build()
+			if err != nil {
+				t.Fatalf("builder %q: %v", b.name, err)
+			}
+			v, err := cm.Get("security.protocol", nil)
 			if err != nil {
 				t.Fatalf("builder %q dropped auth config: %v", b.name, err)
 			}
@@ -103,6 +108,63 @@ func TestAllBuildersPropagateAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildConsumerConfig(t *testing.T) {
+	base := func() *ConsumerConfig {
+		return &ConsumerConfig{Brokers: []string{"b:9092"}, GroupID: "g", Topics: []string{"t"},
+			SessionTimeout: DefaultSessionTimeout}
+	}
+	t.Run("auto offset store is always off (at-least-once)", func(t *testing.T) {
+		cm, err := buildConsumerConfig(base())
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("enable.auto.offset.store", nil); v != false {
+			t.Errorf("enable.auto.offset.store = %v, want false", v)
+		}
+	})
+	t.Run("max.poll.interval.ms floors at librdkafka's 300s default", func(t *testing.T) {
+		// default retry budget is 7s; 7s*1.5 = 10.5s < 300s → floor 300000
+		cm, err := buildConsumerConfig(base())
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 300000 {
+			t.Errorf("max.poll.interval.ms = %v, want 300000", v)
+		}
+	})
+	t.Run("heavy RetryConfig raises max.poll.interval.ms", func(t *testing.T) {
+		// budget 10*30s = 300s; *1.5 → 450000
+		c := base()
+		c.Retry = &RetryConfig{MaxRetries: 10, InitialInterval: 30 * time.Second, Multiplier: 1}
+		cm, err := buildConsumerConfig(c)
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 450000 {
+			t.Errorf("max.poll.interval.ms = %v, want 450000", v)
+		}
+	})
+	t.Run("explicit RebalanceTimeout wins when above the floor", func(t *testing.T) {
+		c := base()
+		c.RebalanceTimeout = 600 * time.Second
+		cm, err := buildConsumerConfig(c)
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 600000 {
+			t.Errorf("max.poll.interval.ms = %v, want 600000", v)
+		}
+	})
+	t.Run("session timeout at or above max.poll.interval is rejected", func(t *testing.T) {
+		c := base()
+		c.SessionTimeout = 500 * time.Second
+		c.Retry = &RetryConfig{MaxRetries: 10, InitialInterval: 30 * time.Second, Multiplier: 1} // raises mpi to 450s
+		if _, err := buildConsumerConfig(c); err == nil {
+			t.Error("buildConsumerConfig() = nil error with session.timeout >= max.poll.interval, want error")
+		}
+	})
 }
 
 func TestBuildProducerConfig(t *testing.T) {

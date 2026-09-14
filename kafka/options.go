@@ -71,7 +71,7 @@ var (
 	DefaultRequestTimeout       = 30 * time.Second
 	DefaultSessionTimeout       = 30 * time.Second
 	DefaultHeartbeatInterval    = 3 * time.Second
-	DefaultRebalanceTimeout     = 60 * time.Second
+	DefaultRebalanceTimeout     = 0 // max.poll.interval.ms is only set when explicit (Task 9)
 	DefaultBatchSize            = 100
 	DefaultBatchTimeout         = 5 * time.Second
 	DefaultIdempotencyTTL       = 1 * time.Hour
@@ -82,6 +82,7 @@ var (
 	DefaultRetryMaxRetries      = 3
 	DefaultRetryInitialInterval = 1 * time.Second
 	DefaultRetryMultiplier      = 2.0
+	DefaultRetryMaxInterval     = 30 * time.Second
 )
 
 // ==================== Client Options ====================

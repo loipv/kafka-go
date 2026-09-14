@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"fmt"
 	"strings"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -81,11 +82,15 @@ func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	return cm
 }
 
-func buildConsumerConfig(c *ConsumerConfig) ckafka.ConfigMap {
+func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	cm := c.conn().configMap()
 	cm["group.id"] = c.GroupID
 	cm["auto.offset.reset"] = getOffsetReset(c.FromBeginning)
 	cm["enable.auto.commit"] = c.AutoCommit
+	// At-least-once: offsets are stored only when a message is parked (see
+	// Consumer.deliver). Auto-store would store on read, before the handler runs.
+	cm["enable.auto.offset.store"] = false
+
 	if c.SessionTimeout > 0 {
 		cm["session.timeout.ms"] = int(c.SessionTimeout.Milliseconds())
 	}
@@ -98,5 +103,27 @@ func buildConsumerConfig(c *ConsumerConfig) ckafka.ConfigMap {
 	if c.PartitionAssignor != "" {
 		cm["partition.assignment.strategy"] = string(c.PartitionAssignor)
 	}
-	return cm
+
+	// max.poll.interval.ms is contested by three features (explicit
+	// RebalanceTimeout, the in-loop retry budget, the DLQ retry sleep).
+	// Floor it at librdkafka's 300s default so wiring a low explicit value
+	// can never make batch consumers MORE fragile.
+	mpiMs := 300000
+	if c.RebalanceTimeout > 0 {
+		mpiMs = int(c.RebalanceTimeout.Milliseconds())
+	}
+	if b := retryBudget(c.Retry); b > 0 {
+		if need := int(float64(b.Milliseconds()) * 1.5); need > mpiMs {
+			mpiMs = need
+		}
+	}
+	cm["max.poll.interval.ms"] = mpiMs
+
+	if v, ok := cm["session.timeout.ms"]; ok {
+		st, _ := v.(int)
+		if st >= mpiMs {
+			return nil, fmt.Errorf("session.timeout.ms (%d) must be < max.poll.interval.ms (%d)", st, mpiMs)
+		}
+	}
+	return cm, nil
 }

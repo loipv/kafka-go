@@ -295,7 +295,6 @@ func newDefaultConsumerConfig() *ConsumerConfig {
 	return &ConsumerConfig{
 		SessionTimeout:     DefaultSessionTimeout,
 		HeartbeatInterval:  DefaultHeartbeatInterval,
-		RebalanceTimeout:   DefaultRebalanceTimeout,
 		BatchSize:          DefaultBatchSize,
 		BatchTimeout:       DefaultBatchTimeout,
 		IdempotencyTTL:     DefaultIdempotencyTTL,

@@ -43,8 +43,9 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 	}, nil
 }
 
-// SendToDLQ sends a failed message to the DLQ
-func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error) error {
+// SendToDLQ sends a failed message to the DLQ. attempts is the number of
+// handler invocations spent on the message (1 = first try, no retry).
+func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return fmt.Errorf("DLQ service is closed")
 	}
@@ -60,12 +61,7 @@ func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error) 
 		msg.Headers["x-dlq-error-message"] = []byte(err.Error())
 	}
 
-	// Get retry count - use strconv for better performance
-	retryCount := 0
-	if countBytes, ok := msg.Headers["x-dlq-handler-retry-count"]; ok {
-		retryCount, _ = strconv.Atoi(string(countBytes))
-	}
-	msg.Headers["x-dlq-handler-retry-count"] = []byte(strconv.Itoa(retryCount))
+	msg.Headers["x-dlq-handler-retry-count"] = []byte(strconv.Itoa(attempts))
 
 	return s.produceToTopic(ctx, s.config.Topic, msg)
 }
@@ -221,6 +217,7 @@ func (cb *CircuitBreaker) IsClosed() bool {
 type DLQMetricsCollector struct {
 	global  DLQGlobalMetrics
 	byTopic map[string]*DLQTopicMetrics
+	blocked []TopicPartition
 	mu      sync.RWMutex
 }
 
@@ -288,6 +285,13 @@ func (m *DLQMetricsCollector) IncrementReprocessFailures() {
 	atomic.AddInt64(&m.global.ReprocessFailures, 1)
 }
 
+// SetBlocked stores an atomic snapshot of the currently blocked partitions.
+func (m *DLQMetricsCollector) SetBlocked(tps []TopicPartition) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.blocked = tps
+}
+
 // GetMetrics returns all metrics
 func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
 	m.mu.RLock()
@@ -310,7 +314,8 @@ func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
 			ReprocessSuccesses: atomic.LoadInt64(&m.global.ReprocessSuccesses),
 			ReprocessFailures:  atomic.LoadInt64(&m.global.ReprocessFailures),
 		},
-		ByTopic: byTopic,
+		ByTopic:           byTopic,
+		BlockedPartitions: append([]TopicPartition(nil), m.blocked...),
 	}
 }
 
@@ -325,6 +330,7 @@ func (m *DLQMetricsCollector) ResetMetrics() {
 	atomic.StoreInt64(&m.global.ReprocessSuccesses, 0)
 	atomic.StoreInt64(&m.global.ReprocessFailures, 0)
 
+	m.blocked = nil
 	m.byTopic = make(map[string]*DLQTopicMetrics)
 }
 

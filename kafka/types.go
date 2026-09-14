@@ -130,8 +130,10 @@ type BatchHandler func(ctx context.Context, msgs []*Message) error
 // GroupedBatchHandler handles key-grouped batches
 type GroupedBatchHandler func(ctx context.Context, groups []GroupedBatch) error
 
-// ErrorHandler handles errors during message processing
-type ErrorHandler func(err error, msg *Message)
+// ErrorHandler handles errors during message processing. Returning nil means
+// the handler took ownership of the message: it is parked (its offset may
+// advance). Returning an error defers to the DLQ / block machinery.
+type ErrorHandler func(ctx context.Context, msg *Message, err error) error
 
 // IdempotencyKeyFunc extracts idempotency key from message
 type IdempotencyKeyFunc func(msg *Message) string
@@ -157,8 +159,9 @@ type RebalanceCallback func(event RebalanceEvent) error
 
 // DLQMetrics represents DLQ metrics
 type DLQMetrics struct {
-	Global  DLQGlobalMetrics           `json:"global"`
-	ByTopic map[string]DLQTopicMetrics `json:"byTopic"`
+	Global            DLQGlobalMetrics           `json:"global"`
+	ByTopic           map[string]DLQTopicMetrics `json:"byTopic"`
+	BlockedPartitions []TopicPartition           `json:"blockedPartitions,omitempty"`
 }
 
 // DLQGlobalMetrics represents global DLQ metrics

@@ -81,9 +81,12 @@ func main() {
 		// Logging
 		kafka.ConsumerWithLogLevel(kafka.LogLevelInfo),
 
-		// Error handler
-		kafka.ConsumerWithErrorHandler(func(err error, msg *kafka.Message) {
+		// Error handler — returning nil claims ownership (the message is
+		// parked and its offset advances); returning the error defers to the
+		// DLQ / block machinery.
+		kafka.ConsumerWithErrorHandler(func(_ context.Context, msg *kafka.Message, err error) error {
 			log.Printf("Error processing message (key=%s): %v", string(msg.Key), err)
+			return nil
 		}),
 	)
 	if err != nil {
