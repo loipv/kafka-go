@@ -305,6 +305,57 @@ func TestClearBlockedOnPark(t *testing.T) {
 	}
 }
 
+// Start-while-running must fail WITHOUT replacing the channel the running
+// loop will close: an orphaned loopExited stalls Close for its full 5s
+// fallback and then destroys the consumer handle while the loop may still be
+// inside ReadMessage (cgo) — the segfault the handshake exists to prevent.
+func TestStartWhileRunningKeepsCloseHandshake(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+
+	c, err := NewConsumer(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 10 * time.Millisecond}),
+		ConsumerWithAutoCommit(true), ConsumerWithAutoCommitInterval(200*time.Millisecond),
+		ConsumerWithFromBeginning(true),
+	)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startErr := make(chan error, 1)
+	go func() { startErr <- c.Start(ctx) }()
+
+	waitFor(t, 10*time.Second, func() bool { return atomic.LoadInt32(&c.running) == 1 },
+		"first Start never began running")
+
+	if err := c.Start(context.Background()); err == nil {
+		t.Fatal("second Start() = nil while already running, want error")
+	}
+
+	closed := make(chan error, 1)
+	closeStart := time.Now()
+	go func() { closed <- c.Close(context.Background()) }()
+	select {
+	case <-closed:
+		if elapsed := time.Since(closeStart); elapsed > 2*time.Second {
+			t.Fatalf("Close took %v, want <2s: the loop-exit channel was orphaned", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close stalled >2s: Start-while-running orphaned the loop-exit channel")
+	}
+	select {
+	case <-startErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Start never returned after Close")
+	}
+}
+
 func TestStartRequiresHandler(t *testing.T) {
 	skipIfShort(t) // no broker needed, but keeps policy uniform
 	c, err := NewConsumer(ConsumerWithBrokers("localhost:9092"),

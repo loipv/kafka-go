@@ -152,16 +152,17 @@ func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return fmt.Errorf("no handler registered; call OnMessage/OnBatch/OnGroupedBatch before Start") // #17
 	}
-	// Publish a fresh exit signal per Start (before the CAS, so Close can
-	// never observe running==1 without a published channel): restarting a
-	// consumer whose previous loop already exited must not double-close.
-	c.mu.Lock()
-	c.loopExited = make(chan struct{})
-	c.mu.Unlock()
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
 		return fmt.Errorf("consumer is already running")
 	}
+	// Publish this run's exit signal only after winning the CAS: a failed
+	// Start must never replace the channel the already-running loop closes,
+	// or Close would wait on an orphan (guaranteed 5s stall, then a close
+	// racing an in-flight poll).
+	c.mu.Lock()
+	c.loopExited = make(chan struct{})
+	c.mu.Unlock()
 	defer atomic.StoreInt32(&c.running, 0) // #8: every exit path releases
 	defer close(c.loopExited)              // signals Close that the loop is gone
 
@@ -961,6 +962,21 @@ func (c *Consumer) resumeBlocked() {
 	if len(toResume) > 0 {
 		if err := c.consumer.Resume(toResume); err != nil {
 			c.logger.Error("resume failed for blocked partition (next pass re-attempts): %v", err)
+			// Roll the resumed flag back so the next pass really does
+			// re-attempt: leaving it set would park the partition until a
+			// rebalance drops the blocked state.
+			c.blockMu.Lock()
+			for _, tp := range toResume {
+				if tp.Topic == nil {
+					continue
+				}
+				key := TopicPartition{Topic: *tp.Topic, Partition: tp.Partition}
+				if bs, ok := c.blocked[key]; ok {
+					bs.resumed = false
+					c.blocked[key] = bs
+				}
+			}
+			c.blockMu.Unlock()
 		}
 	}
 }
