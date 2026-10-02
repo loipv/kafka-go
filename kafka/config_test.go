@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -103,6 +104,42 @@ func TestAllBuildersPropagateAuth(t *testing.T) {
 			// auth key surfaces as a nil value, not an error.
 			if v, _ := cm.Get("security.protocol", nil); v != "sasl_ssl" {
 				t.Errorf("builder %q security.protocol = %v, want sasl_ssl", b.name, v)
+			}
+		})
+	}
+}
+
+// DLQ on a separate cluster: empty DLQ.Brokers inherits the consumer's
+// connection; a set DLQ.Brokers uses only the DLQ's own SSL/SASL/Raw so the
+// consumer's credentials never reach a foreign cluster.
+func TestDLQConn(t *testing.T) {
+	consumerSASL := &SASLConfig{Mechanism: "PLAIN", Username: "cu", Password: "cp"}
+	dlqSASL := &SASLConfig{Mechanism: "SCRAM-SHA-512", Username: "du", Password: "dp"}
+	tests := []struct {
+		name string
+		dlq  *DLQConfig
+		want connConfig
+	}{
+		{
+			name: "empty brokers inherits consumer connection",
+			dlq:  &DLQConfig{Topic: "dlq"},
+			want: connConfig{Brokers: []string{"a:9092"}, SSL: true, SASL: consumerSASL,
+				Raw: map[string]any{"x": 1}},
+		},
+		{
+			name: "set brokers isolates from consumer auth",
+			dlq: &DLQConfig{Topic: "dlq", Brokers: []string{"b:9092"}, SASL: dlqSASL,
+				Raw: map[string]any{"y": 2}},
+			want: connConfig{Brokers: []string{"b:9092"}, SASL: dlqSASL,
+				Raw: map[string]any{"y": 2}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &ConsumerConfig{Brokers: []string{"a:9092"}, SSL: true, SASL: consumerSASL,
+				Raw: map[string]any{"x": 1}, DLQ: tt.dlq}
+			if got := c.dlqConn(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("dlqConn() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

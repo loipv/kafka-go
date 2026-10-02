@@ -110,6 +110,10 @@ The ones that will surprise people:
   librdkafka config keys, merged last.
 - Sentinel errors in `kafka/errors.go` (`ErrProducerClosed`,
   `ErrBrokersRequired`, `ErrNoHandler`, …) for programmatic assertions.
+- `DLQConfig.Brokers` / `SSL` / `SASL` / `Raw` — send the DLQ to a separate
+  cluster. Empty `Brokers` keeps today's behavior (DLQ shares the consumer's
+  connection); when set, the DLQ producer and DLQ retry consumer use only these
+  fields and inherit nothing from the consumer.
 - Health checks compute real consumer lag via watermark offsets.
 - Test suite: unit + mock-broker tests (`kafka.NewMockCluster`, no Docker) on
   every run, plus a build-tagged Redpanda integration suite; CI workflow

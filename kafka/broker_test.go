@@ -532,6 +532,74 @@ func TestDLQRoundTrip(t *testing.T) {
 	}, "source offset never advanced past the DLQ-parked message")
 }
 
+// DLQ on a separate cluster: the parked copy lands on DLQConfig.Brokers'
+// cluster, never on the consumer's.
+func TestDLQSeparateCluster(t *testing.T) {
+	skipIfShort(t)
+	src := newMockCluster(t)
+	dst := newMockCluster(t)
+	source := uniqueTopic(t, src, 1)
+	dlqTopic := uniqueTopic(t, dst, 1)
+	if err := src.CreateTopic(dlqTopic, 1, 1); err != nil {
+		t.Fatalf("CreateTopic on source cluster: %v", err)
+	}
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(src.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{
+			Topic: dlqTopic, Brokers: []string{dst.BootstrapServers()},
+			MaxRetries: 1, RetryDelay: 10 * time.Millisecond, RetryBackoffMultiplier: 1,
+		}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return errors.New("fail") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(src.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, source, &Message{Value: []byte("poison")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	// Parked once the source offset advances — by then the DLQ produce is confirmed.
+	waitFor(t, 20*time.Second, func() bool {
+		return committedOffset(t, src.BootstrapServers(), group, source, 0) >= 1
+	}, "source offset never advanced past the DLQ-parked message")
+
+	if n := topicHighWatermark(t, dst.BootstrapServers(), dlqTopic); n != 1 {
+		t.Errorf("DLQ cluster %s high watermark = %d, want 1", dlqTopic, n)
+	}
+	if n := topicHighWatermark(t, src.BootstrapServers(), dlqTopic); n != 0 {
+		t.Errorf("consumer cluster %s high watermark = %d, want 0 (DLQ leaked to source cluster)", dlqTopic, n)
+	}
+}
+
+func topicHighWatermark(t *testing.T, brokers, topic string) int64 {
+	t.Helper()
+	ac, err := ckafka.NewConsumer(&ckafka.ConfigMap{"bootstrap.servers": brokers, "group.id": uniqueGroupName(t)})
+	if err != nil {
+		t.Fatalf("watermark consumer: %v", err)
+	}
+	defer ac.Close()
+	_, high, err := ac.QueryWatermarkOffsets(topic, 0, 5000)
+	if err != nil {
+		t.Fatalf("QueryWatermarkOffsets(%s): %v", topic, err)
+	}
+	return high
+}
+
 // Proof #8b: when the DLQ produce cannot be CONFIRMED (broker unreachable)
 // the source partition BLOCKS — the message is never dropped. The handler is
 // gated so the poison message is fetched while the broker is up; the broker

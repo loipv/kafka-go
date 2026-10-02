@@ -59,6 +59,15 @@ func (c *ConsumerConfig) conn() connConfig {
 	return connConfig{Brokers: c.Brokers, SSL: c.SSL, SASL: c.SASL, Raw: c.Raw}
 }
 
+// dlqConn is the connection for every DLQ handle (producer, retry consumer):
+// the consumer's own unless DLQ.Brokers points at a separate cluster.
+func (c *ConsumerConfig) dlqConn() connConfig {
+	if c.DLQ == nil || len(c.DLQ.Brokers) == 0 {
+		return c.conn()
+	}
+	return connConfig{Brokers: c.DLQ.Brokers, SSL: c.DLQ.SSL, SASL: c.DLQ.SASL, Raw: c.DLQ.Raw}
+}
+
 func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	cm := c.conn().configMap()
 	cm["acks"] = int(c.Acks)

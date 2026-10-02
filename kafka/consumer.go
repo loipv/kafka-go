@@ -122,7 +122,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 
 	// Initialize DLQ service if configured
 	if config.DLQ != nil {
-		kc.dlqService, err = newDLQService(config.conn(), config.DLQ, kc.metrics)
+		kc.dlqService, err = newDLQService(config.dlqConn(), config.DLQ, kc.metrics)
 		if err != nil {
 			_ = consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)
@@ -686,7 +686,7 @@ func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
 		groupID = fmt.Sprintf("%s-retry-consumer", dlqTopic)
 	}
 
-	cm := c.config.conn().configMap()
+	cm := c.config.dlqConn().configMap()
 	cm["group.id"] = groupID
 	cm["auto.offset.reset"] = getOffsetReset(retryConfig.FromBeginning)
 	cm["enable.auto.commit"] = false // Task 10 makes commit-after-success explicit

@@ -702,6 +702,23 @@ state := consumer.CircuitState("orders-dlq")
 consumer.ResetCircuit("orders-dlq")
 ```
 
+### DLQ on a Separate Cluster
+
+By default the DLQ is written to the consumer's own cluster, reusing its
+brokers and SSL/SASL. Set `Brokers` to send it elsewhere — the DLQ producer and
+the DLQ retry consumer then use **only** the DLQ's `SSL`/`SASL`/`Raw`; nothing
+is inherited from the consumer, so its credentials never reach the other
+cluster:
+
+```go
+kafka.ConsumerWithDLQ(&kafka.DLQConfig{
+    Topic:   "orders-dlq",
+    Brokers: []string{"dlq-kafka:9093"},
+    SSL:     true,
+    SASL:    &kafka.SASLConfig{Mechanism: "SCRAM-SHA-512", Username: "dlq", Password: "..."},
+}),
+```
+
 ### DLQ Metrics
 
 ```go

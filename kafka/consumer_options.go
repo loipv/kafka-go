@@ -70,6 +70,15 @@ type DLQConfig struct {
 	RetryBackoffMultiplier float64
 	IncludeErrorInfo       bool
 	CircuitBreaker         *CircuitBreakerConfig
+
+	// Separate DLQ cluster. Empty Brokers inherits the consumer's connection
+	// (brokers, SSL, SASL, Raw). Set Brokers and the DLQ producer and DLQ
+	// retry consumer use only the SSL/SASL/Raw below — nothing is inherited,
+	// so the consumer's credentials never reach another cluster.
+	Brokers []string
+	SSL     bool
+	SASL    *SASLConfig
+	Raw     map[string]any
 }
 
 // DLQRetryConfig holds DLQ auto-retry configuration
