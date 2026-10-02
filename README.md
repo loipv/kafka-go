@@ -56,7 +56,7 @@ kafka-go/
 │   ├── options.go            # Producer options (ProducerWith*)
 │   ├── consumer_options.go   # Consumer options (ConsumerWith*)
 │   ├── config.go             # connConfig seam shared by all internal clients
-│   ├── client.go             # Producer implementation
+│   ├── producer.go           # Producer implementation
 │   ├── consumer.go           # Consumer implementation
 │   ├── dlq.go                # DLQ, Circuit Breaker, Idempotency
 │   ├── health.go             # Health checks

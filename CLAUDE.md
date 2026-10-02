@@ -43,9 +43,9 @@ go run examples/typed_consumer/main.go
 
 ### Core Components
 
-All library code lives in the `kafka/` package. There are **no interfaces for the producer/consumer** — `NewProducer`/`NewConsumer` return the concrete `*Producer` (client.go) and `*Consumer` (consumer.go). A user who needs a seam declares their own interface on the consuming side. Because both our package and confluent's are named `kafka`, confluent's package is aliased **`ckafka`** throughout (`ckafka.Message`, `ckafka.ConfigMap`, ...).
+All library code lives in the `kafka/` package. There are **no interfaces for the producer/consumer** — `NewProducer`/`NewConsumer` return the concrete `*Producer` (producer.go) and `*Consumer` (consumer.go). A user who needs a seam declares their own interface on the consuming side. Because both our package and confluent's are named `kafka`, confluent's package is aliased **`ckafka`** throughout (`ckafka.Message`, `ckafka.ConfigMap`, ...).
 
-- **Producer**: `client.go` - `Produce()`, `ProduceBatch()`, `ProduceMultiTopicBatch()` (synchronous, `errors.Join` for batches) and `ProduceAsync()` (delivery failures go to `ProducerWithDeliveryErrorHandler`, otherwise logged). `Close()` waits on the delivery-report goroutine.
+- **Producer**: `producer.go` - `Produce()`, `ProduceBatch()`, `ProduceMultiTopicBatch()` (synchronous, `errors.Join` for batches) and `ProduceAsync()` (delivery failures go to `ProducerWithDeliveryErrorHandler`, otherwise logged). `Close()` waits on the delivery-report goroutine.
 - **Consumer**: `consumer.go` - Handler-based processing via `OnMessage`/`OnBatch`/`OnGroupedBatch`, dispatched through the `invokeHandler` seam. Also `Commit(msgs...)`, `Pause()`/`Resume()` (broker-fetch pause, reconciled in the poll loop), `DLQMetrics()`, `CircuitState(topic)`.
 - **Types**: `types.go` - Core types (`Message`, `Headers`, `GroupedBatch`, `TopicBatch`, `TopicPartition`) and enums.
 - **Config seam**: `config.go` - `connConfig` with a `configMap()` method; every internal client (producer, consumer, DLQ producer, DLQ retry consumer, health checks) builds its config through it, so SSL/SASL is inherited everywhere.
