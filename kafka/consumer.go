@@ -432,46 +432,6 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	}
 }
 
-// executeWithRetry executes the handler with retry logic. The returned
-// attempts count handler invocations (1 = first try, no retry).
-func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, error) {
-	r := c.retry
-	maxRetries, multiplier, maxInterval := r.MaxRetries, r.Multiplier, r.MaxInterval
-	var lastErr error
-	delay := r.InitialInterval
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err := c.messageHandler(ctx, msg)
-		if err == nil {
-			return attempt + 1, nil
-		}
-
-		lastErr = err
-		c.metrics.incHandlerFailures(msg.Topic)
-
-		if attempt < maxRetries {
-			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
-			select {
-			case <-ctx.Done():
-				return attempt + 1, ctx.Err()
-			case <-c.done: // Close() without ctx cancel: stop retrying, report the last error
-				return attempt + 1, lastErr
-			case <-c.after(delay):
-				delay = time.Duration(float64(delay) * multiplier)
-				if delay > maxInterval {
-					delay = maxInterval // retryBudget assumes capped sleeps — keep them capped
-				}
-			}
-		}
-	}
-
-	if r.SkipOnMaxRetries {
-		c.logger.Warn("max retries exceeded — skipping message", "error", lastErr)
-		return maxRetries + 1, fmt.Errorf("%w: %w", ErrSkippedOnMaxRetries, lastErr)
-	}
-	return maxRetries + 1, lastErr
-}
-
 // handleError parks or blocks a failed message: the error handler can claim
 // ownership (nil return = parked), then the DLQ; with neither, or when the DLQ
 // produce fails, the message is unparkable and its partition blocks.
@@ -777,153 +737,6 @@ func (c *Consumer) Commit(msgs ...*Message) error {
 	return err
 }
 
-// blockState is the per-partition blocked bookkeeping. offset is the lowest
-// blocked offset seen — a forward seek must never overwrite it (queued
-// messages can re-block with a higher offset, which would strand the
-// original). Entries survive resumes: blocks escalate until the message
-// finally parks (clearBlockedOnPark) or the partition is revoked.
-type blockState struct {
-	retryAt time.Time
-	blocks  int
-	offset  int64
-	resumed bool
-}
-
-// blockMessages pauses the affected partitions, seeks them back to the
-// failed messages' offsets, and records an escalating retry-at deadline.
-// The poll loop keeps running — other partitions flow normally.
-// ponytail: per-poll linear scan of c.blocked — fine for hundreds of
-// partitions; index by time if it ever isn't.
-func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
-	if len(msgs) == 0 {
-		return
-	}
-	minOff := map[TopicPartition]int64{}
-	for _, m := range msgs {
-		tp := TopicPartition{Topic: m.Topic, Partition: m.Partition}
-		if o, ok := minOff[tp]; !ok || m.Offset < o {
-			minOff[tp] = m.Offset
-		}
-	}
-	now := time.Now()
-	var paused []ckafka.TopicPartition
-	c.blockMu.Lock()
-	for tp, off := range minOff {
-		bs := c.blocked[tp]
-		if bs.blocks == 0 || off < bs.offset {
-			bs.offset = off
-		}
-		bs.blocks++
-		bs.resumed = false
-		bs.retryAt = now.Add(blockBackoff(bs.blocks, c.retry))
-		c.blocked[tp] = bs
-		topic := tp.Topic
-		paused = append(paused, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(bs.offset)})
-		c.logger.Warn("partition blocked — message unparkable",
-			"topic", tp.Topic, "partition", tp.Partition, "offset", bs.offset,
-			"blocks", bs.blocks, "retryIn", blockBackoff(bs.blocks, c.retry))
-	}
-	c.blockMu.Unlock()
-	c.metrics.setBlocked(c.blockedSnapshot())
-	if err := c.consumer.Pause(paused); err != nil {
-		c.logger.Error("pause failed for blocked partition (next pass re-attempts)", "error", err)
-	}
-	for _, tp := range paused {
-		if err := c.consumer.Seek(tp, 5000); err != nil {
-			t := ""
-			if tp.Topic != nil {
-				t = *tp.Topic
-			}
-			c.logger.Error("seek failed for blocked partition",
-				"topic", t, "partition", tp.Partition, "offset", tp.Offset, "error", err)
-		}
-	}
-}
-
-// resumeBlocked resumes partitions whose backoff elapsed. Called each poll
-// pass. Skips partitions while the user-level Pause() is active. Entries are
-// NOT deleted here: blocks must keep escalating across cycles until the
-// message finally parks (clearBlockedOnPark) — deleting on resume would reset
-// the backoff to InitialInterval and make a poison partition retry flat-out
-// forever.
-func (c *Consumer) resumeBlocked() {
-	if c.paused.Load() {
-		return
-	}
-	now := time.Now()
-	var toResume []ckafka.TopicPartition
-	c.blockMu.Lock()
-	for tp, bs := range c.blocked {
-		if !bs.resumed && now.After(bs.retryAt) {
-			bs.resumed = true
-			c.blocked[tp] = bs
-			topic := tp.Topic
-			toResume = append(toResume, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition})
-		}
-	}
-	c.blockMu.Unlock()
-	if len(toResume) > 0 {
-		if err := c.consumer.Resume(toResume); err != nil {
-			c.logger.Error("resume failed for blocked partition (next pass re-attempts)", "error", err)
-			// Roll the resumed flag back so the next pass really does
-			// re-attempt: leaving it set would park the partition until a
-			// rebalance drops the blocked state.
-			c.blockMu.Lock()
-			for _, tp := range toResume {
-				if tp.Topic == nil {
-					continue
-				}
-				key := TopicPartition{Topic: *tp.Topic, Partition: tp.Partition}
-				if bs, ok := c.blocked[key]; ok {
-					bs.resumed = false
-					c.blocked[key] = bs
-				}
-			}
-			c.blockMu.Unlock()
-		}
-	}
-}
-
-// clearBlockedOnPark drops the blocked state for a partition once its message
-// parked at or past the blocked offset — a success resets the escalation.
-func (c *Consumer) clearBlockedOnPark(msg *Message) {
-	tp := TopicPartition{Topic: msg.Topic, Partition: msg.Partition}
-	cleared := false
-	c.blockMu.Lock()
-	if bs, ok := c.blocked[tp]; ok && msg.Offset >= bs.offset {
-		delete(c.blocked, tp)
-		cleared = true
-	}
-	c.blockMu.Unlock()
-	if cleared {
-		c.metrics.setBlocked(c.blockedSnapshot())
-	}
-}
-
-func (c *Consumer) blockedSnapshot() []TopicPartition {
-	c.blockMu.Lock()
-	defer c.blockMu.Unlock()
-	out := make([]TopicPartition, 0, len(c.blocked))
-	for tp := range c.blocked {
-		out = append(out, tp)
-	}
-	return out
-}
-
-// dropBlockedFor drops blocked-partition bookkeeping for the given partitions
-// (called on revoke — a revoked partition is no longer ours to resume).
-func (c *Consumer) dropBlockedFor(ps []ckafka.TopicPartition) {
-	c.blockMu.Lock()
-	for _, tp := range ps {
-		if tp.Topic == nil {
-			continue
-		}
-		delete(c.blocked, TopicPartition{Topic: *tp.Topic, Partition: tp.Partition})
-	}
-	c.blockMu.Unlock()
-	c.metrics.setBlocked(c.blockedSnapshot())
-}
-
 // convertPartitions converts ckafka.TopicPartition to our TopicPartition type
 func convertPartitions(ps []ckafka.TopicPartition) []TopicPartition {
 	out := make([]TopicPartition, len(ps))
@@ -935,8 +748,6 @@ func convertPartitions(ps []ckafka.TopicPartition) []TopicPartition {
 	}
 	return out
 }
-
-// Helper functions
 
 // commitOffsets converts messages to librdkafka TopicPartitions, deduplicating
 // to the max offset per (topic, partition) and storing offset+1 — committing
@@ -958,49 +769,4 @@ func commitOffsets(msgs []*Message) []ckafka.TopicPartition {
 		})
 	}
 	return out
-}
-
-// retryBudget returns the worst-case wall time of one executeWithRetry cycle
-// (all sleeps, no handler time). Feeds the max.poll.interval.ms floor.
-func retryBudget(r RetryConfig) time.Duration {
-	maxRetries, initial, multiplier, maxInterval := r.MaxRetries, r.InitialInterval, r.Multiplier, r.MaxInterval
-	var total time.Duration
-	delay := initial
-	for i := 0; i < maxRetries; i++ {
-		total += delay
-		if d := time.Duration(float64(delay) * multiplier); d > maxInterval {
-			delay = maxInterval
-		} else {
-			delay = d
-		}
-	}
-	return total
-}
-
-// blockBackoff is the escalating-with-cap wait before a blocked partition is
-// resumed: InitialInterval doubling per consecutive block of the same message,
-// capped at MaxInterval, reset when the message finally parks.
-func blockBackoff(blocks int, r RetryConfig) time.Duration {
-	initial, maxInterval := r.InitialInterval, r.MaxInterval
-	d := initial
-	for i := 1; i < blocks && d < maxInterval; i++ {
-		d *= 2
-	}
-	if d > maxInterval {
-		d = maxInterval
-	}
-	return d
-}
-
-func offsetReset(fromBeginning bool) string {
-	if fromBeginning {
-		return "earliest"
-	}
-	return "latest"
-}
-
-// appendTime formats time in RFC3339 format without allocating a string
-// Uses time.AppendFormat for zero-allocation formatting
-func appendTime(buf []byte, t time.Time) []byte {
-	return t.AppendFormat(buf, time.RFC3339)
 }

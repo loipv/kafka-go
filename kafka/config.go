@@ -186,3 +186,47 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	}
 	return cm, nil
 }
+
+// SASLConfig holds SASL authentication configuration
+type SASLConfig struct {
+	Mechanism string
+	Username  string
+	Password  string
+}
+
+// String redacts the password so printing a SASLConfig (or a config that
+// holds one) never leaks it. Value receiver: covers SASLConfig and *SASLConfig.
+func (s SASLConfig) String() string {
+	return fmt.Sprintf("SASLConfig{Mechanism:%s Username:%s Password:[REDACTED]}", s.Mechanism, s.Username)
+}
+
+// GoString redacts the password for the %#v verb, which bypasses String.
+func (s SASLConfig) GoString() string { return s.String() }
+
+// LogValue implements slog.LogValuer with the password redacted.
+func (s SASLConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("mechanism", s.Mechanism),
+		slog.String("username", s.Username),
+		slog.String("password", "[REDACTED]"),
+	)
+}
+
+// TracingConfig holds OpenTelemetry tracing configuration
+type TracingConfig struct {
+	Enabled       bool
+	TracerName    string
+	TracerVersion string
+
+	// IncludeMessageKey records the message key as the
+	// messaging.kafka.message.key span attribute. Off by default: message
+	// keys may contain personal data (user ids, emails).
+	IncludeMessageKey bool
+}
+
+func offsetReset(fromBeginning bool) string {
+	if fromBeginning {
+		return "earliest"
+	}
+	return "latest"
+}

@@ -76,10 +76,32 @@ type DLQConfig struct {
 	Raw     map[string]any
 }
 
+// RetryConfig holds retry configuration. A zero field uses its default value:
+// MaxRetries 3, InitialInterval 1s, MaxInterval 30s, Multiplier 2.0.
+type RetryConfig struct {
+	MaxRetries       int
+	InitialInterval  time.Duration
+	MaxInterval      time.Duration
+	Multiplier       float64
+	SkipOnMaxRetries bool
+}
+
 // ConsumerOption is a function that configures the consumer
 type ConsumerOption func(*ConsumerConfig)
 
-// ==================== Consumer Options ====================
+// Default values
+const (
+	defaultSessionTimeout       = 30 * time.Second
+	defaultHeartbeatInterval    = 3 * time.Second
+	defaultBatchSize            = 100
+	defaultBatchTimeout         = 5 * time.Second
+	defaultIdempotencyTTL       = 1 * time.Hour
+	defaultAutoCommitInterval   = 5 * time.Second
+	defaultRetryMaxRetries      = 3
+	defaultRetryInitialInterval = 1 * time.Second
+	defaultRetryMultiplier      = 2.0
+	defaultRetryMaxInterval     = 30 * time.Second
+)
 
 // ConsumerWithBrokers sets the Kafka broker addresses for consumer
 func ConsumerWithBrokers(brokers ...string) ConsumerOption {
