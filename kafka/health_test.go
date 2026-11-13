@@ -154,3 +154,28 @@ func TestHealth_CheckTopicMissingTopicIsDown(t *testing.T) {
 		}
 	}
 }
+
+// expiredDeadlineCtx reports a deadline that has passed while Err is still
+// nil: the window between a context's deadline and its timer firing.
+type expiredDeadlineCtx struct{ context.Context }
+
+func (expiredDeadlineCtx) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+
+// Check and CheckTopic must never hand librdkafka a non-positive timeout: with
+// no time left they report DOWN with the deadline error and skip the query (the
+// zero-value checker has no client, so a query would panic).
+func TestHealth_NoTimeLeftIsDownWithoutQuery(t *testing.T) {
+	h := &HealthChecker{}
+	ctx := expiredDeadlineCtx{context.Background()}
+	for name, check := range map[string]func() *HealthResult{
+		"Check":      func() *HealthResult { return h.Check(ctx) },
+		"CheckTopic": func() *HealthResult { return h.CheckTopic(ctx, "orders") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := check()
+			if res.Status != HealthStatusDown || res.Error != context.DeadlineExceeded.Error() {
+				t.Errorf("%s = %s (%q), want DOWN with %q", name, res.Status, res.Error, context.DeadlineExceeded)
+			}
+		})
+	}
+}

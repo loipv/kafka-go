@@ -128,7 +128,14 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	default:
 	}
 
-	metadata, err := h.admin.GetMetadata(nil, true, int(h.deadlineTimeout(ctx).Milliseconds()))
+	timeoutMs, err := h.queryTimeoutMs(ctx)
+	if err != nil {
+		return &HealthResult{
+			Status: HealthStatusDown,
+			Error:  err.Error(),
+		}
+	}
+	metadata, err := h.admin.GetMetadata(nil, true, timeoutMs)
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
@@ -318,7 +325,17 @@ func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthRes
 	default:
 	}
 
-	metadata, err := h.admin.GetMetadata(&topic, false, int(h.deadlineTimeout(ctx).Milliseconds()))
+	timeoutMs, err := h.queryTimeoutMs(ctx)
+	if err != nil {
+		return &HealthResult{
+			Status: HealthStatusDown,
+			Error:  err.Error(),
+			Details: map[string]any{
+				"topic": topic,
+			},
+		}
+	}
+	metadata, err := h.admin.GetMetadata(&topic, false, timeoutMs)
 	if err != nil {
 		return &HealthResult{
 			Status: HealthStatusDown,
