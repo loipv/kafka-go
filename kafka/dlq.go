@@ -16,16 +16,16 @@ import (
 // maxDLQErrorBytes caps the x-dlq-error-message header value.
 const maxDLQErrorBytes = 1024
 
-// truncateUTF8 returns the longest prefix of s that is at most max bytes and
+// truncateUTF8 returns the longest prefix of s that is at most limit bytes and
 // ends on a rune boundary. It returns s unchanged when it already fits.
-func truncateUTF8(s string, max int) string {
-	if max <= 0 {
+func truncateUTF8(s string, limit int) string {
+	if limit <= 0 {
 		return ""
 	}
-	if len(s) <= max {
+	if len(s) <= limit {
 		return s
 	}
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
