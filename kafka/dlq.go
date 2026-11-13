@@ -56,26 +56,18 @@ func (s *dlqService) produceToDLQ(ctx context.Context, msg *Message, err error, 
 		out.SetHeader("x-dlq-error-message", []byte(err.Error()))
 	}
 
-	return s.produceToTopic(ctx, s.config.Topic, &out)
-}
-
-// produceToTopic sends a message to a specific topic
-func (s *dlqService) produceToTopic(ctx context.Context, topic string, msg *Message) error {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return ErrDLQClosed
-	}
-
+	dlqTopic := s.config.Topic
 	kafkaMsg := &ckafka.Message{
 		TopicPartition: ckafka.TopicPartition{
-			Topic:     &topic,
+			Topic:     &dlqTopic,
 			Partition: ckafka.PartitionAny,
 		},
-		Key:   msg.Key,
-		Value: msg.Value,
+		Key:   out.Key,
+		Value: out.Value,
 	}
 
 	// Add headers
-	for k, v := range msg.Headers {
+	for k, v := range out.Headers {
 		kafkaMsg.Headers = append(kafkaMsg.Headers, ckafka.Header{
 			Key:   k,
 			Value: v,
@@ -83,9 +75,8 @@ func (s *dlqService) produceToTopic(ctx context.Context, topic string, msg *Mess
 	}
 
 	deliveryChan := make(chan ckafka.Event, 1)
-	err := s.producer.Produce(kafkaMsg, deliveryChan)
-	if err != nil {
-		return fmt.Errorf("failed to produce to DLQ: %w", err)
+	if perr := s.producer.Produce(kafkaMsg, deliveryChan); perr != nil {
+		return fmt.Errorf("failed to produce to DLQ: %w", perr)
 	}
 
 	// Wait for delivery
@@ -94,7 +85,8 @@ func (s *dlqService) produceToTopic(ctx context.Context, topic string, msg *Mess
 		if m, ok := e.(*ckafka.Message); ok && m.TopicPartition.Error != nil {
 			return fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
 		}
-		s.metrics.incrementSentToDLQ(topic)
+		// Metrics are keyed by the source topic, not the DLQ topic.
+		s.metrics.incrementSentToDLQ(msg.Topic)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

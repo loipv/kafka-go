@@ -1,6 +1,8 @@
 package kafka
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -50,6 +52,60 @@ func TestMessageSetHeader(t *testing.T) {
 	m.SetHeader("k", []byte("v2"))
 	if len(m.Headers) != 1 || string(m.Headers["k"]) != "v2" {
 		t.Errorf("SetHeader overwrite: got %v", m.Headers)
+	}
+}
+
+// A DLQ-parked message is counted under its SOURCE topic, never the DLQ topic.
+func TestDLQ_MetricsKeyedBySourceTopic(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	source := uniqueTopic(t, mc, 1)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic, IncludeErrorInfo: true}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return errors.New("handler always fails") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, source, &Message{Value: []byte("poison")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	waitFor(t, 20*time.Second, func() bool {
+		return topicHighWatermark(t, mc.BootstrapServers(), dlqTopic) == 1
+	}, "message never arrived on the DLQ topic")
+	// The metric is recorded on the delivery report, which precedes the offset
+	// store; wait for the parked source offset so the counter is settled.
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, source, 0) >= 1
+	}, "source offset never advanced past the DLQ-parked message")
+
+	m := c.DLQMetrics()
+	if m.Global.MessagesSentToDLQ != 1 {
+		t.Errorf("Global.MessagesSentToDLQ = %d, want 1", m.Global.MessagesSentToDLQ)
+	}
+	if m.ByTopic[source].SentToDLQ != 1 {
+		t.Errorf("ByTopic[source].SentToDLQ = %d, want 1", m.ByTopic[source].SentToDLQ)
+	}
+	if _, ok := m.ByTopic[dlqTopic]; ok {
+		t.Errorf("metrics must be keyed by source topic, found entry for DLQ topic %q", dlqTopic)
 	}
 }
 
