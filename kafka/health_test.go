@@ -89,3 +89,46 @@ func TestHealth_QueryTimeoutMs(t *testing.T) {
 		}
 	})
 }
+
+func TestHealth_CheckTopic(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 3)
+	hc, err := NewHealthChecker(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewHealthChecker: %v", err)
+	}
+	defer hc.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res := hc.CheckTopic(ctx, topic)
+	if res.Status != HealthStatusUp {
+		t.Fatalf("CheckTopic(%s) = %s (%s), want UP", topic, res.Status, res.Error)
+	}
+	if got := res.Details["partitionCount"]; got != 3 {
+		t.Errorf("Details[partitionCount] = %v, want 3", got)
+	}
+}
+
+func TestHealth_CancelledContext(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	hc, err := NewHealthChecker(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewHealthChecker: %v", err)
+	}
+	defer hc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, res := range map[string]*HealthResult{
+		"Check":            hc.Check(ctx),
+		"CheckTopic":       hc.CheckTopic(ctx, "any"),
+		"CheckConsumerLag": hc.CheckConsumerLag(ctx, "any-group", 0),
+	} {
+		if res.Status != HealthStatusDown || res.Error == "" {
+			t.Errorf("%s with a cancelled context = %s (%q), want DOWN with an error", name, res.Status, res.Error)
+		}
+	}
+}

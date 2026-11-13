@@ -820,3 +820,51 @@ func TestConsumer_RequiresBrokersGroupAndTopics(t *testing.T) {
 		})
 	}
 }
+
+// Pause stops the broker fetch (applied by the poll loop once a partition is
+// assigned) and Resume brings delivery back.
+func TestConsumer_PauseResume(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	got := make(chan *Message, 4)
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic))...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(_ context.Context, m *Message) error { got <- m; return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	c.Pause()
+	// The poll loop applies the pause only once the assignment exists; waiting
+	// on pauseApplied (instead of a fixed sleep) means the produce below can
+	// never race ahead of the pause.
+	waitFor(t, 15*time.Second, func() bool { return c.pauseApplied.Load() },
+		"poll loop never applied the pause")
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("held")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	select {
+	case m := <-got:
+		t.Fatalf("handler received %q while paused", m.Value)
+	case <-time.After(time.Second):
+	}
+
+	c.Resume()
+	msgs := recvMessages(t, got, 1, 15*time.Second)
+	if string(msgs[0].Value) != "held" {
+		t.Errorf("after Resume got %q, want held", msgs[0].Value)
+	}
+}
