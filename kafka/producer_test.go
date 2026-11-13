@@ -280,3 +280,20 @@ func TestProducer_ProduceBatchBackPressureHonoursContext(t *testing.T) {
 		t.Errorf("ProduceBatch took %v after a 2s deadline, want it to return promptly", d)
 	}
 }
+
+// Flush after Close must not touch the destroyed librdkafka handle (a cgo
+// fault that kills the process); it returns ErrProducerClosed.
+func TestProducer_FlushAfterCloseReturnsErrProducerClosed(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := p.Flush(time.Second); !errors.Is(err, ErrProducerClosed) {
+		t.Errorf("Flush() after Close = %v, want ErrProducerClosed", err)
+	}
+}

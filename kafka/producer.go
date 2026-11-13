@@ -260,7 +260,12 @@ func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 // Flush waits up to timeout for every queued message (including ProduceAsync
 // ones) to be delivered. It returns an error stating how many messages are
 // still queued when the timeout expires, and nil when the queue drained.
+// Calling it after Close returns ErrProducerClosed (Close already flushed), and
+// it must not be called concurrently with Close.
 func (p *Producer) Flush(timeout time.Duration) error {
+	if p.closed.Load() {
+		return ErrProducerClosed // the librdkafka handle is gone; touching it faults
+	}
 	remaining := p.producer.Flush(int(timeout.Milliseconds()))
 	if remaining > 0 {
 		return fmt.Errorf("%d messages still in queue after flush", remaining)

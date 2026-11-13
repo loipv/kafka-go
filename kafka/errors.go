@@ -4,8 +4,8 @@ import "errors"
 
 // Sentinel errors returned by the library. Assert on them with errors.Is.
 var (
-	// ErrProducerClosed is returned by Produce, ProduceBatch and ProduceAsync
-	// after the Producer has been closed.
+	// ErrProducerClosed is returned by Produce, ProduceBatch, ProduceAsync and
+	// Flush after the Producer has been closed.
 	ErrProducerClosed = errors.New("producer is closed")
 	// ErrConsumerClosed is returned by Consumer.Start after Close, and by
 	// Consumer.Commit once the consumer has been closed.
