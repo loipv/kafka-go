@@ -43,3 +43,29 @@ func TestTracingServiceInjectsWithoutGlobalPropagator(t *testing.T) {
 		t.Errorf("ended spans = %d, want 1", len(sr.Ended()))
 	}
 }
+
+func TestTracing_MessageKeyOnlyWhenOptedIn(t *testing.T) {
+	for _, include := range []bool{false, true} {
+		sr := tracetest.NewSpanRecorder()
+		origTP := otel.GetTracerProvider()
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+		svc := newTracingService(&TracingConfig{Enabled: true, IncludeMessageKey: include})
+		msg := &Message{Topic: "t", Key: []byte("user-42")}
+		_, end := svc.startProducerSpan(context.Background(), "t", msg)
+		end(nil)
+		_, end = svc.startConsumerSpan(context.Background(), "g", msg)
+		end(nil)
+		otel.SetTracerProvider(origTP)
+		for _, s := range sr.Ended() {
+			var found bool
+			for _, a := range s.Attributes() {
+				if string(a.Key) == "messaging.kafka.message.key" {
+					found = a.Value.AsString() == "user-42"
+				}
+			}
+			if found != include {
+				t.Errorf("IncludeMessageKey=%v: span %q has key attribute = %v", include, s.Name(), found)
+			}
+		}
+	}
+}

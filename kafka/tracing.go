@@ -76,8 +76,8 @@ func (t *tracingService) startProducerSpan(ctx context.Context, topic string, ms
 		),
 	)
 
-	// Add message key if present
-	if msg.Key != nil {
+	// Add message key only when opted in (keys may hold personal data)
+	if msg.Key != nil && t.config.IncludeMessageKey {
 		span.SetAttributes(attribute.String(messagingKafkaMessageKeyKey, string(msg.Key)))
 	}
 
@@ -110,8 +110,8 @@ func (t *tracingService) startConsumerSpan(ctx context.Context, groupID string, 
 		),
 	)
 
-	// Add message key if present
-	if msg.Key != nil {
+	// Add message key only when opted in (keys may hold personal data)
+	if msg.Key != nil && t.config.IncludeMessageKey {
 		span.SetAttributes(attribute.String(messagingKafkaMessageKeyKey, string(msg.Key)))
 	}
 

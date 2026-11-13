@@ -58,6 +58,11 @@ type TracingConfig struct {
 	Enabled       bool
 	TracerName    string
 	TracerVersion string
+
+	// IncludeMessageKey records the message key as the
+	// messaging.kafka.message.key span attribute. Off by default: message
+	// keys may contain personal data (user ids, emails).
+	IncludeMessageKey bool
 }
 
 // ProducerOption is a function that configures the client
