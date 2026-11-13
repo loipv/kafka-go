@@ -59,26 +59,26 @@ func TestBlockBackoff(t *testing.T) {
 		{20, 30 * time.Second},
 	}
 	for _, tt := range tests {
-		if got := blockBackoff(tt.blocks, r); got != tt.want {
+		if got := blockBackoff(tt.blocks, normalizeRetry(r)); got != tt.want {
 			t.Errorf("blockBackoff(%d) = %v, want %v", tt.blocks, got, tt.want)
 		}
 	}
 	// zero-value RetryConfig must not panic and must fall back to defaults
-	if got := blockBackoff(1, nil); got <= 0 {
-		t.Errorf("blockBackoff(1, nil) = %v, want positive default", got)
+	if got := blockBackoff(1, normalizeRetry(nil)); got <= 0 {
+		t.Errorf("blockBackoff(1, normalizeRetry(nil)) = %v, want positive default", got)
 	}
 }
 
 func TestRetryBudget(t *testing.T) {
 	// defaults: 3 retries, 1s initial, 2x => 1+2+4 = 7s
-	if got, want := retryBudget(nil), 7*time.Second; got != want {
-		t.Errorf("retryBudget(nil) = %v, want %v", got, want)
+	if got, want := retryBudget(normalizeRetry(nil)), 7*time.Second; got != want {
+		t.Errorf("retryBudget(normalizeRetry(nil)) = %v, want %v", got, want)
 	}
 	// MaxInterval caps each delay. 3 sleeps (1+2 would be followed by a capped
 	// 3): 1+2+3 = 6s. (The brief's "1+2+3+3 = 9s" miscounted four sleeps for
 	// three retries — executeWithRetry sleeps only between attempts.)
 	r := &RetryConfig{MaxRetries: 3, InitialInterval: time.Second, Multiplier: 2, MaxInterval: 3 * time.Second}
-	if got, want := retryBudget(r), 6*time.Second; got != want {
+	if got, want := retryBudget(normalizeRetry(r)), 6*time.Second; got != want {
 		t.Errorf("retryBudget(capped) = %v, want %v", got, want)
 	}
 }

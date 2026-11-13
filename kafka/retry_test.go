@@ -14,12 +14,12 @@ import (
 // poll interval mid-retry and evict the consumer from the group.
 func TestExecuteWithRetryCapsDelay(t *testing.T) {
 	c := &Consumer{
-		config: &ConsumerConfig{Retry: &RetryConfig{
+		retry: normalizeRetry(&RetryConfig{
 			MaxRetries:      5,
 			InitialInterval: 100 * time.Millisecond,
 			Multiplier:      2,
 			MaxInterval:     150 * time.Millisecond,
-		}},
+		}),
 		logger:  slog.New(slog.DiscardHandler),
 		metrics: newMetricsCollector(),
 		after:   time.After, // executeWithRetry sleeps through this seam
@@ -75,7 +75,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var delays []time.Duration
-			c := &Consumer{config: &ConsumerConfig{Retry: tt.retry},
+			c := &Consumer{retry: normalizeRetry(tt.retry),
 				after: func(d time.Duration) <-chan time.Time {
 					delays = append(delays, d)
 					ch := make(chan time.Time, 1)
@@ -112,7 +112,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 }
 
 func TestExecuteWithRetryContextCancel(t *testing.T) {
-	c := &Consumer{config: &ConsumerConfig{Retry: &RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}},
+	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
 		after:   func(_ time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
 		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }

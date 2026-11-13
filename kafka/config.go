@@ -119,7 +119,7 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 			mpiMs = explicit
 		}
 	}
-	if b := retryBudget(c.Retry); b > 0 {
+	if b := retryBudget(normalizeRetry(c.Retry)); b > 0 {
 		if need := int(float64(b.Milliseconds()) * 1.5); need > mpiMs {
 			mpiMs = need
 		}

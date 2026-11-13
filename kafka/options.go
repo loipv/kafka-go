@@ -43,7 +43,8 @@ type SASLConfig struct {
 	Password  string
 }
 
-// RetryConfig holds retry configuration
+// RetryConfig holds retry configuration. A zero field uses its default value:
+// MaxRetries 3, InitialInterval 1s, MaxInterval 30s, Multiplier 2.0.
 type RetryConfig struct {
 	MaxRetries       int
 	InitialInterval  time.Duration

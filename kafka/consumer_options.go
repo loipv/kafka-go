@@ -272,3 +272,32 @@ func newDefaultConsumerConfig() *ConsumerConfig {
 		PartitionAssignor:  AssignorRange,
 	}
 }
+
+// normalizeRetry resolves r into a RetryConfig with every field set: a nil r
+// or a field that is not > 0 takes its default. SkipOnMaxRetries is carried
+// through unchanged.
+func normalizeRetry(r *RetryConfig) RetryConfig {
+	out := RetryConfig{
+		MaxRetries:      defaultRetryMaxRetries,
+		InitialInterval: defaultRetryInitialInterval,
+		MaxInterval:     defaultRetryMaxInterval,
+		Multiplier:      defaultRetryMultiplier,
+	}
+	if r == nil {
+		return out
+	}
+	if r.MaxRetries > 0 {
+		out.MaxRetries = r.MaxRetries
+	}
+	if r.InitialInterval > 0 {
+		out.InitialInterval = r.InitialInterval
+	}
+	if r.MaxInterval > 0 {
+		out.MaxInterval = r.MaxInterval
+	}
+	if r.Multiplier > 0 {
+		out.Multiplier = r.Multiplier
+	}
+	out.SkipOnMaxRetries = r.SkipOnMaxRetries
+	return out
+}

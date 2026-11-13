@@ -48,6 +48,9 @@ type Consumer struct {
 	dlqService *dlqService
 	metrics    *metricsCollector
 
+	// retry is the resolved RetryConfig (defaults applied once in NewConsumer).
+	retry RetryConfig
+
 	// after is the sleep seam for retry waits; tests swap it to make
 	// backoff cycles instantaneous. Defaults to time.After.
 	after func(time.Duration) <-chan time.Time
@@ -116,6 +119,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		metrics:  newMetricsCollector(),
 		blocked:  make(map[TopicPartition]blockState),
 		after:    time.After,
+		retry:    normalizeRetry(config.Retry),
 	}
 
 	// Initialize tracing if enabled
@@ -420,30 +424,10 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 // executeWithRetry executes the handler with retry logic. The returned
 // attempts count handler invocations (1 = first try, no retry).
 func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, error) {
-	maxRetries := defaultRetryMaxRetries
-	initialInterval := defaultRetryInitialInterval
-	multiplier := defaultRetryMultiplier
-	maxInterval := defaultRetryMaxInterval
-	skipOnMaxRetries := false
-
-	if c.config.Retry != nil {
-		if c.config.Retry.MaxRetries > 0 {
-			maxRetries = c.config.Retry.MaxRetries
-		}
-		if c.config.Retry.InitialInterval > 0 {
-			initialInterval = c.config.Retry.InitialInterval
-		}
-		if c.config.Retry.Multiplier > 0 {
-			multiplier = c.config.Retry.Multiplier
-		}
-		if c.config.Retry.MaxInterval > 0 {
-			maxInterval = c.config.Retry.MaxInterval
-		}
-		skipOnMaxRetries = c.config.Retry.SkipOnMaxRetries
-	}
-
+	r := c.retry
+	maxRetries, multiplier, maxInterval := r.MaxRetries, r.Multiplier, r.MaxInterval
 	var lastErr error
-	delay := initialInterval
+	delay := r.InitialInterval
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err := c.messageHandler(ctx, msg)
@@ -470,7 +454,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 		}
 	}
 
-	if skipOnMaxRetries {
+	if r.SkipOnMaxRetries {
 		c.logger.Warn("max retries exceeded — skipping message", "error", lastErr)
 		return maxRetries + 1, fmt.Errorf("%w: %w", ErrSkippedOnMaxRetries, lastErr)
 	}
@@ -798,13 +782,13 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 		}
 		bs.blocks++
 		bs.resumed = false
-		bs.retryAt = now.Add(blockBackoff(bs.blocks, c.config.Retry))
+		bs.retryAt = now.Add(blockBackoff(bs.blocks, c.retry))
 		c.blocked[tp] = bs
 		topic := tp.Topic
 		paused = append(paused, ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(bs.offset)})
 		c.logger.Warn("partition blocked — message unparkable",
 			"topic", tp.Topic, "partition", tp.Partition, "offset", bs.offset,
-			"blocks", bs.blocks, "retryIn", blockBackoff(bs.blocks, c.config.Retry))
+			"blocks", bs.blocks, "retryIn", blockBackoff(bs.blocks, c.retry))
 	}
 	c.blockMu.Unlock()
 	c.metrics.setBlocked(c.blockedSnapshot())
@@ -945,22 +929,8 @@ func commitOffsets(msgs []*Message) []ckafka.TopicPartition {
 
 // retryBudget returns the worst-case wall time of one executeWithRetry cycle
 // (all sleeps, no handler time). Feeds the max.poll.interval.ms floor.
-func retryBudget(r *RetryConfig) time.Duration {
-	maxRetries, initial, multiplier, maxInterval := defaultRetryMaxRetries, defaultRetryInitialInterval, defaultRetryMultiplier, defaultRetryMaxInterval
-	if r != nil {
-		if r.MaxRetries > 0 {
-			maxRetries = r.MaxRetries
-		}
-		if r.InitialInterval > 0 {
-			initial = r.InitialInterval
-		}
-		if r.Multiplier > 0 {
-			multiplier = r.Multiplier
-		}
-		if r.MaxInterval > 0 {
-			maxInterval = r.MaxInterval
-		}
-	}
+func retryBudget(r RetryConfig) time.Duration {
+	maxRetries, initial, multiplier, maxInterval := r.MaxRetries, r.InitialInterval, r.Multiplier, r.MaxInterval
 	var total time.Duration
 	delay := initial
 	for i := 0; i < maxRetries; i++ {
@@ -977,16 +947,8 @@ func retryBudget(r *RetryConfig) time.Duration {
 // blockBackoff is the escalating-with-cap wait before a blocked partition is
 // resumed: InitialInterval doubling per consecutive block of the same message,
 // capped at MaxInterval, reset when the message finally parks.
-func blockBackoff(blocks int, r *RetryConfig) time.Duration {
-	initial, maxInterval := defaultRetryInitialInterval, defaultRetryMaxInterval
-	if r != nil {
-		if r.InitialInterval > 0 {
-			initial = r.InitialInterval
-		}
-		if r.MaxInterval > 0 {
-			maxInterval = r.MaxInterval
-		}
-	}
+func blockBackoff(blocks int, r RetryConfig) time.Duration {
+	initial, maxInterval := r.InitialInterval, r.MaxInterval
 	d := initial
 	for i := 1; i < blocks && d < maxInterval; i++ {
 		d *= 2
