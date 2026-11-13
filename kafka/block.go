@@ -56,7 +56,10 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 	c.blockMu.Unlock()
 	c.metrics.setBlocked(c.blockedSnapshot())
 	if err := c.consumer.Pause(paused); err != nil {
-		c.logger.Error("pause failed for blocked partition (next pass re-attempts)", "error", err)
+		// Nothing retries the pause itself: the seek below still rewinds the
+		// partition, so the message comes straight back without its backoff
+		// wait, and its next failure blocks (and tries to pause) again.
+		c.logger.Error("pause failed for blocked partition; the message is redelivered without the backoff wait", "error", err)
 	}
 	for _, tp := range paused {
 		if err := c.consumer.Seek(tp, 5000); err != nil {
