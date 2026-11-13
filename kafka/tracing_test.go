@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// #29: without otel.SetTextMapPropagator, the global is a no-op and W3C
+// Without otel.SetTextMapPropagator, the global is a no-op and W3C
 // propagation silently did nothing. The library must default to TraceContext.
 func TestTracingServiceInjectsWithoutGlobalPropagator(t *testing.T) {
 	orig := otel.GetTextMapPropagator()

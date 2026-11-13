@@ -26,16 +26,16 @@ type Consumer struct {
 
 	// State - using atomic for hot path operations
 	mu           sync.RWMutex
-	running      int32 // atomic: 0=stopped, 1=running
-	paused       int32 // atomic: 0=running, 1=paused
-	pauseApplied int32 // atomic: pause/resume actually applied to librdkafka
-	closed       int32 // atomic: 0=open, 1=closed
-	handleClosed int32 // atomic: set once the librdkafka handle is about to be destroyed
+	running      atomic.Bool // true while Start is active
+	paused       atomic.Bool // true while Pause is in effect
+	pauseApplied atomic.Bool // pause/resume actually applied to librdkafka
+	closed       atomic.Bool // true once closed
+	handleClosed atomic.Bool // set once the librdkafka handle is about to be destroyed
 
 	// Lifecycle / batch flush
 	done       chan struct{} // closed by Close; stops helper goroutines
 	loopExited chan struct{} // closed when the main consume loop returns
-	flushCh    chan struct{} // cap 1: batch-flush signal consumed in the main loop (#18)
+	flushCh    chan struct{} // cap 1: batch-flush signal consumed in the main loop
 
 	// Batch processing
 	batchMu sync.Mutex
@@ -114,7 +114,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		logger = slog.Default() // silence with slog.New(slog.DiscardHandler)
 	}
 
-	kc := &Consumer{
+	c := &Consumer{
 		consumer: consumer,
 		config:   config,
 		logger:   logger,
@@ -129,24 +129,24 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 
 	// Initialize tracing if enabled
 	if config.Tracing != nil && config.Tracing.Enabled {
-		kc.tracer = newTracingService(config.Tracing)
+		c.tracer = newTracingService(config.Tracing)
 	}
 
 	// Initialize idempotency store if configured
 	if config.IdempotencyKey != nil {
-		kc.idempotencyStore = newIdempotencyStore(config.IdempotencyTTL)
+		c.idempotencyStore = newIdempotencyStore(config.IdempotencyTTL)
 	}
 
 	// Initialize DLQ service if configured
 	if config.DLQ != nil {
-		kc.dlqService, err = newDLQService(config.dlqConn(), config.DLQ, kc.metrics)
+		c.dlqService, err = newDLQService(config.dlqConn(), config.DLQ, c.metrics)
 		if err != nil {
 			_ = consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)
 		}
 	}
 
-	return kc, nil
+	return c, nil
 }
 
 // OnMessage registers a handler for single messages. Only one handler is
@@ -184,13 +184,13 @@ func isFatalClientError(err error) bool {
 // cancellation, on Close, or on a fatal client error.
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
-		return ErrNoHandler // #17
+		return ErrNoHandler
 	}
-	if atomic.LoadInt32(&c.closed) == 1 {
+	if c.closed.Load() {
 		return ErrConsumerClosed
 	}
 	// Use atomic CAS to ensure only one Start can succeed
-	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
+	if !c.running.CompareAndSwap(false, true) {
 		return ErrConsumerRunning
 	}
 	// Publish this run's exit signal only after winning the CAS: a failed
@@ -200,11 +200,11 @@ func (c *Consumer) Start(ctx context.Context) error {
 	c.mu.Lock()
 	c.loopExited = make(chan struct{})
 	c.mu.Unlock()
-	defer atomic.StoreInt32(&c.running, 0) // #8: every exit path releases
-	defer close(c.loopExited)              // signals Close that the loop is gone
+	defer c.running.Store(false) // every exit path releases
+	defer close(c.loopExited)    // signals Close that the loop is gone
 
 	// Subscribe to topics; the rebalance callback is always installed so the
-	// library's own commit/assign logic runs even without a user callback (#31)
+	// library's own commit/assign logic runs even without a user callback
 	if err := c.consumer.SubscribeTopics(c.config.Topics, c.rebalanceCallback()); err != nil {
 		return fmt.Errorf("failed to subscribe to topics: %w", err)
 	}
@@ -224,7 +224,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 		case <-c.flushCh:
 			c.processBatch(ctx)
 		default:
-			c.reconcilePause() // #12: real pause, reconciled every pass
+			c.reconcilePause() // real pause, reconciled every pass
 			c.resumeBlocked()  // unblock partitions whose backoff elapsed
 
 			msg, err := c.consumer.ReadMessage(100 * time.Millisecond)
@@ -262,12 +262,12 @@ func (c *Consumer) Start(ctx context.Context) error {
 // Close falls back to a bounded 5s wait for the consume loop and may then
 // close the handle while a long retry is still in flight.
 func (c *Consumer) Close(ctx context.Context) error {
-	wasRunning := atomic.LoadInt32(&c.running) == 1
+	wasRunning := c.running.Load()
 	// Use atomic CAS to ensure only one Close can succeed
-	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
+	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	atomic.StoreInt32(&c.running, 0)
+	c.running.Store(false)
 
 	// Stop helper goroutines (batch flush ticker)
 	close(c.done)
@@ -300,18 +300,18 @@ func (c *Consumer) Close(ctx context.Context) error {
 		c.idempotencyStore.close()
 	}
 
-	atomic.StoreInt32(&c.handleClosed, 1)
+	c.handleClosed.Store(true)
 	return c.consumer.Close()
 }
 
 // Pause pauses consumption
 func (c *Consumer) Pause() {
-	atomic.StoreInt32(&c.paused, 1)
+	c.paused.Store(true)
 }
 
 // Resume resumes consumption
 func (c *Consumer) Resume() {
-	atomic.StoreInt32(&c.paused, 0)
+	c.paused.Store(false)
 }
 
 // reconcilePause applies the user-visible Pause/Resume to the current
@@ -319,8 +319,8 @@ func (c *Consumer) Resume() {
 // must run continuously rather than once — and Assignment() is empty before
 // the first rebalance completes, which the len check absorbs.
 func (c *Consumer) reconcilePause() {
-	want := atomic.LoadInt32(&c.paused) == 1
-	applied := atomic.LoadInt32(&c.pauseApplied) == 1
+	want := c.paused.Load()
+	applied := c.pauseApplied.Load()
 	if want == applied {
 		return
 	}
@@ -335,15 +335,8 @@ func (c *Consumer) reconcilePause() {
 		perr = c.consumer.Resume(partitions)
 	}
 	if perr == nil {
-		atomic.StoreInt32(&c.pauseApplied, boolToInt32(want))
+		c.pauseApplied.Store(want)
 	}
-}
-
-func boolToInt32(b bool) int32 {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // Metrics returns a snapshot of the consumer's handler-failure and DLQ counters.
@@ -669,7 +662,7 @@ func (c *Consumer) handleBatchError(ctx context.Context, err error, batch []*Mes
 
 // batchFlushLoop ticks every BatchTimeout and signals the main loop to flush.
 // It never processes the batch itself — flushing on two goroutines raced the
-// main loop's own size-triggered flush (#18). The non-blocking send collapses
+// main loop's own size-triggered flush. The non-blocking send collapses
 // multiple ticks into one pending flush.
 func (c *Consumer) batchFlushLoop(ctx context.Context) {
 	t := time.NewTicker(c.config.BatchTimeout)
@@ -690,16 +683,16 @@ func (c *Consumer) batchFlushLoop(ctx context.Context) {
 }
 
 // rebalanceCallback is ALWAYS installed (even without a user callback) so the
-// library's own commit-before-revoke runs (#31). Under a cooperative assignor,
+// library's own commit-before-revoke runs. Under a cooperative assignor,
 // Assign/Unassign would replace the whole assignment mid-rebalance — an
-// API violation — so the protocol is checked and incremental variants used (#32).
+// API violation — so the protocol is checked and incremental variants used.
 func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 	return func(consumer *ckafka.Consumer, event ckafka.Event) error {
 		cooperative := consumer.GetRebalanceProtocol() == "COOPERATIVE"
 		switch e := event.(type) {
 		case ckafka.AssignedPartitions:
 			c.logger.Info("partitions assigned", "count", len(e.Partitions))
-			atomic.StoreInt32(&c.pauseApplied, 0) // rebalance resets librdkafka pause state
+			c.pauseApplied.Store(false) // rebalance resets librdkafka pause state
 
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
@@ -710,7 +703,7 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 			}
 
 			if cooperative {
-				return consumer.IncrementalAssign(e.Partitions) // #32
+				return consumer.IncrementalAssign(e.Partitions)
 			}
 			return consumer.Assign(e.Partitions)
 
@@ -733,10 +726,10 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 				}
 			}
 
-			c.dropBlockedFor(e.Partitions) // no-op until Task 9
+			c.dropBlockedFor(e.Partitions)
 
 			if cooperative {
-				return consumer.IncrementalUnassign(e.Partitions) // #32
+				return consumer.IncrementalUnassign(e.Partitions)
 			}
 			return consumer.Unassign()
 		}
@@ -770,7 +763,7 @@ func ignoreNoOffset(err error) error {
 // consumption. Offsets are committed at max(msg.Offset)+1 per (topic,
 // partition).
 func (c *Consumer) Commit(msgs ...*Message) error {
-	if atomic.LoadInt32(&c.handleClosed) == 1 {
+	if c.handleClosed.Load() {
 		return ErrConsumerClosed
 	}
 	if len(msgs) == 0 {
@@ -854,7 +847,7 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 // the backoff to InitialInterval and make a poison partition retry flat-out
 // forever.
 func (c *Consumer) resumeBlocked() {
-	if atomic.LoadInt32(&c.paused) == 1 {
+	if c.paused.Load() {
 		return
 	}
 	now := time.Now()
@@ -999,7 +992,7 @@ func blockBackoff(blocks int, r RetryConfig) time.Duration {
 	return d
 }
 
-func getOffsetReset(fromBeginning bool) string {
+func offsetReset(fromBeginning bool) string {
 	if fromBeginning {
 		return "earliest"
 	}

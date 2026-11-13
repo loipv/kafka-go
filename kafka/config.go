@@ -140,7 +140,7 @@ func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	cm := c.conn().configMap()
 	cm["group.id"] = c.GroupID
-	cm["auto.offset.reset"] = getOffsetReset(c.FromBeginning)
+	cm["auto.offset.reset"] = offsetReset(c.FromBeginning)
 	cm["enable.auto.commit"] = c.AutoCommit
 	// At-least-once: offsets are stored only when a message is parked (see
 	// Consumer.deliver). Auto-store would store on read, before the handler runs.

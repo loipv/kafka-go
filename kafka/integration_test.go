@@ -1,8 +1,8 @@
 //go:build integration
 
-// T3 integration suite: the three proofs a MockCluster cannot provide —
-// SASL auth end to end (#1), cooperative rebalance with two real consumers
-// (#5), and real consumer lag (#4). Runs against a Redpanda testcontainer
+// Integration suite: the three proofs a MockCluster cannot provide —
+// SASL auth end to end, cooperative rebalance with two real consumers
+// and real consumer lag. Runs against a Redpanda testcontainer
 // with SASL enabled; Docker required:
 //
 //	go test -tags=integration -timeout=15m -run TestIntegration ./kafka/...
@@ -154,7 +154,7 @@ func saslCommitted(t *testing.T, brokers, group, topic string, partition int32) 
 	return -1
 }
 
-// TestIntegrationSASL_ProduceConsumeDLQHealth is proof #1: every client the
+// TestIntegrationSASL_ProduceConsumeDLQHealth proves that every client the
 // library owns — producer, consumer, the DLQ's internal producer, and the
 // health checker — authenticates against a broker that rejects
 // unauthenticated clients. On v1.0.0 with auth on, none of this path works.
@@ -361,7 +361,7 @@ func (h *captureHandler) rebalanceFailures() []string {
 	return out
 }
 
-// TestIntegrationCooperativeRebalance is proof #5: two consumers share a
+// TestIntegrationCooperativeRebalance proves that two consumers share a
 // 6-partition topic under the cooperative-sticky assignor; stopping one
 // grows the survivor's assignment — and the growth is real, confirmed
 // against librdkafka's own Assignment(). v1.0.0 called the eager Assign()
@@ -432,7 +432,7 @@ func TestIntegrationCooperativeRebalance(t *testing.T) {
 	}
 }
 
-// TestIntegrationConsumerLag is proof #4: real consumer lag. 100 produced,
+// TestIntegrationConsumerLag proves real consumer lag: 100 produced,
 // 10 consumed and explicitly committed on a single-partition topic →
 // CheckConsumerLag(maxLag=50) must report DOWN with lag exactly 90 — on
 // v1.0.0 the check could never return DOWN.

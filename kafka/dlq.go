@@ -38,7 +38,7 @@ type dlqService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *metricsCollector
-	closed   int32 // atomic: 0=open, 1=closed
+	closed   atomic.Bool // true once closed
 }
 
 // dlqDeliveryTimeout bounds how long the poll loop waits for a DLQ delivery
@@ -92,7 +92,7 @@ func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *c
 
 	out.SetHeader("x-dlq-original-topic", []byte(msg.Topic))
 	out.SetHeader("x-dlq-timestamp", appendTime(nil, time.Now()))
-	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // #9: the real count
+	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // the real count
 	if s.config.IncludeErrorInfo && cause != nil {
 		out.SetHeader("x-dlq-error-message", []byte(truncateUTF8(cause.Error(), maxDLQErrorBytes)))
 	}
@@ -121,7 +121,7 @@ func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *c
 // only when all messages were confirmed; the caller decides what a failure
 // means (the partition blocks).
 func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause error, attempts int) error {
-	if atomic.LoadInt32(&s.closed) == 1 {
+	if s.closed.Load() {
 		return ErrDLQClosed
 	}
 	deliveryChan := make(chan ckafka.Event, len(msgs))
@@ -172,7 +172,7 @@ func confirmDLQEvent(e ckafka.Event) (string, error) {
 // Close closes the DLQ service
 func (s *dlqService) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
-	if !atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
+	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 

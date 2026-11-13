@@ -37,7 +37,7 @@ func uniqueTopic(t *testing.T, mc *ckafka.MockCluster, partitions int) string {
 }
 
 // uniqueGroupName returns a per-run consumer group ID. Group-ID reuse across
-// tests is the #1 flake source (stale offsets from an earlier run).
+// tests is the top flake source (stale offsets from an earlier run).
 func uniqueGroupName(t *testing.T) string {
 	t.Helper()
 	return strings.ToLower(strings.ReplaceAll(t.Name(), "/", "_")) +

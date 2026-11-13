@@ -42,7 +42,7 @@ func committedOffset(t *testing.T, brokers, group, topic string, partition int32
 	return -1
 }
 
-// fastAtLeastOnce is the common option set for the T2 at-least-once tests:
+// fastAtLeastOnce is the common option set for the at-least-once tests:
 // quick retry cycles and a short auto-commit interval so committed offsets
 // move within waitFor deadlines.
 func fastAtLeastOnce(extra ...ConsumerOption) []ConsumerOption {
@@ -335,7 +335,7 @@ func TestStartWhileRunningKeepsCloseHandshake(t *testing.T) {
 	startErr := make(chan error, 1)
 	go func() { startErr <- c.Start(ctx) }()
 
-	waitFor(t, 10*time.Second, func() bool { return atomic.LoadInt32(&c.running) == 1 },
+	waitFor(t, 10*time.Second, func() bool { return c.running.Load() },
 		"first Start never began running")
 
 	if err := c.Start(context.Background()); err == nil {

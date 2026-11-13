@@ -299,7 +299,7 @@ func TestOnGroupedBatchPreservesFirstSeenKeyOrder(t *testing.T) {
 	}
 }
 
-// Proof #3: explicit Commit with NO rebalance callback (dead in v1.0.0) —
+// Explicit Commit with NO rebalance callback (dead in v1.0.0) —
 // the committed offset persists and a fresh consumer in the same group
 // resumes right after it.
 func TestCommitResumeWithoutRebalanceCallback(t *testing.T) {
@@ -384,7 +384,7 @@ func TestCommitResumeWithoutRebalanceCallback(t *testing.T) {
 	}
 }
 
-// Proof #2: a failing handler with DLQ config parks via a CONFIRMED DLQ
+// A failing handler with DLQ config parks via a CONFIRMED DLQ
 // produce — the DLQ copy carries the diagnostic headers and the source
 // offset then advances.
 func TestDLQRoundTrip(t *testing.T) {
@@ -546,7 +546,7 @@ func topicHighWatermark(t *testing.T, brokers, topic string) int64 {
 	return high
 }
 
-// Proof #8b: when the DLQ produce cannot be CONFIRMED (broker unreachable)
+// When the DLQ produce cannot be CONFIRMED (broker unreachable)
 // the source partition BLOCKS — the message is never dropped. The handler is
 // gated so the poison message is fetched while the broker is up; the broker
 // then goes down before the handler starts failing, so every DLQ produce

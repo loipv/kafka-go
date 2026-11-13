@@ -18,7 +18,7 @@ type Producer struct {
 	config   *ProducerConfig
 	tracer   *tracingService
 	logger   *slog.Logger
-	closed   int32 // atomic: 0=open, 1=closed
+	closed   atomic.Bool // true once closed
 
 	done        chan struct{}
 	wg          sync.WaitGroup
@@ -52,7 +52,7 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 		logger = slog.Default() // silence with slog.New(slog.DiscardHandler)
 	}
 
-	client := &Producer{
+	p := &Producer{
 		producer:    producer,
 		config:      config,
 		logger:      logger,
@@ -62,14 +62,14 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 
 	// Initialize tracing if enabled
 	if config.Tracing != nil && config.Tracing.Enabled {
-		client.tracer = newTracingService(config.Tracing)
+		p.tracer = newTracingService(config.Tracing)
 	}
 
 	// Start delivery report handler
-	client.wg.Add(1)
-	go client.handleDeliveryReports()
+	p.wg.Add(1)
+	go p.handleDeliveryReports()
 
-	return client, nil
+	return p, nil
 }
 
 // Produce sends a single message to a topic and waits for its delivery report.
@@ -103,7 +103,7 @@ func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Messag
 }
 
 func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
-	if atomic.LoadInt32(&p.closed) == 1 {
+	if p.closed.Load() {
 		err := ErrProducerClosed
 		for _, m := range msgs {
 			endSpan(m, err) // spans were started in prepareMessage before this check
@@ -205,7 +205,7 @@ func topicOf(m *ckafka.Message) string {
 // back-pressures naturally when its queue is full. Delivery failures go to
 // the DeliveryErrorHandler.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
-	if atomic.LoadInt32(&p.closed) == 1 {
+	if p.closed.Load() {
 		return ErrProducerClosed
 	}
 	return p.producer.Produce(p.buildKafkaMessage(topic, msg), nil)
@@ -228,7 +228,7 @@ var closeFlushTimeout = 10 * time.Second
 // the delivery-report reader to drain before closing the producer under it.
 func (p *Producer) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
-	if !atomic.CompareAndSwapInt32(&p.closed, 0, 1) {
+	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
@@ -239,7 +239,7 @@ func (p *Producer) Close() error {
 		p.logger.Warn("producer closed with undelivered messages", "remaining", remaining)
 	}
 	close(p.done)
-	p.wg.Wait() // let the report reader exit before closing the producer under it (#30)
+	p.wg.Wait() // let the report reader exit before closing the producer under it
 	p.producer.Close()
 	return nil
 }
