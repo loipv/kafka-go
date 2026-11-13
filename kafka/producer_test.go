@@ -10,6 +10,9 @@ import (
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestProducer_DeliveryReportOK(t *testing.T) {
@@ -295,5 +298,66 @@ func TestProducer_FlushAfterCloseReturnsErrProducerClosed(t *testing.T) {
 	}
 	if err := p.Flush(time.Second); !errors.Is(err, ErrProducerClosed) {
 		t.Errorf("Flush() after Close = %v, want ErrProducerClosed", err)
+	}
+}
+
+// A delivery event that is not a message report confirms nothing: it must be
+// an error, never a silent success (as for the DLQ, see confirmDLQEvent).
+func TestProducer_FinishDeliveryNonMessageEventIsError(t *testing.T) {
+	if err := finishDelivery(ckafka.NewError(ckafka.ErrFail, "x", false)); err == nil {
+		t.Error("finishDelivery(non-message event) = nil, want an error")
+	}
+	topic := "t"
+	if err := finishDelivery(&ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic}}); err != nil {
+		t.Errorf("finishDelivery(delivered message) = %v, want nil", err)
+	}
+}
+
+// endCountingProvider is a tracer provider whose spans count End calls. The
+// SDK ignores a second End, but other providers need not.
+type endCountingProvider struct {
+	noop.TracerProvider
+	ends *int
+}
+
+func (p endCountingProvider) Tracer(string, ...trace.TracerOption) trace.Tracer {
+	return endCountingTracer{ends: p.ends}
+}
+
+type endCountingTracer struct {
+	noop.Tracer
+	ends *int
+}
+
+func (t endCountingTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	return ctx, endCountingSpan{ends: t.ends}
+}
+
+type endCountingSpan struct {
+	noop.Span
+	ends *int
+}
+
+func (s endCountingSpan) End(...trace.SpanEndOption) { *s.ends++ }
+
+// The delivery report is a different *ckafka.Message carrying the same span
+// closure, so a message that reported and is then aborted (ctx ended while
+// other messages were pending) reaches the closure twice; the span must end
+// once.
+func TestProducer_SpanEndsOnceWhenReportedThenAborted(t *testing.T) {
+	orig := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(orig) })
+	var ends int
+	otel.SetTracerProvider(endCountingProvider{ends: &ends})
+
+	p := &Producer{tracer: newTracingService(&TracingConfig{Enabled: true})}
+	km := p.prepareMessage(context.Background(), "t", &Message{Value: []byte("v")})
+	report := *km // librdkafka hands back a copy with the same Opaque
+	if err := finishDelivery(&report); err != nil {
+		t.Fatalf("finishDelivery: %v", err)
+	}
+	endSpan(km, context.Canceled) // what abort() does for every message
+	if ends != 1 {
+		t.Errorf("span End calls = %d, want 1", ends)
 	}
 }

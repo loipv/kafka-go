@@ -123,13 +123,16 @@ func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Messa
 
 // prepareMessage builds the wire message and stashes the span ender in
 // Opaque — the delivery report hands the same closure back, so correlation
-// is by identity, never by index.
+// is by identity, never by index. The report is a different *ckafka.Message,
+// so clearing its Opaque leaves the original's set: the closure ends the span
+// at most once, however many times it is called.
 func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Message) *ckafka.Message {
 	km := p.buildKafkaMessage(topic, msg)
 	if p.tracer != nil {
 		msgCtx, end := p.tracer.startProducerSpan(ctx, topic, msg)
 		p.tracer.injectTraceContext(msgCtx, km)
-		km.Opaque = end
+		var once sync.Once
+		km.Opaque = func(err error) { once.Do(func() { end(err) }) }
 	}
 	return km
 }
@@ -163,7 +166,7 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 	}
 	abort := func() error {
 		for _, m := range msgs {
-			endSpan(m, ctx.Err()) // idempotent: already-reported messages skip
+			endSpan(m, ctx.Err()) // no-op for a message whose report already ended its span
 		}
 		return errors.Join(append(errs, ctx.Err())...)
 	}
@@ -206,11 +209,12 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 }
 
 // finishDelivery ends the span for one delivery report and returns the
-// delivery error, if any.
+// delivery error, if any. An event that is not a message report confirms
+// nothing and is an error.
 func finishDelivery(e ckafka.Event) error {
 	m, ok := e.(*ckafka.Message)
 	if !ok {
-		return nil
+		return fmt.Errorf("delivery: unexpected event %T: %v", e, e)
 	}
 	if err := m.TopicPartition.Error; err != nil {
 		endSpan(m, err)
@@ -221,8 +225,9 @@ func finishDelivery(e ckafka.Event) error {
 	return nil
 }
 
-// endSpan ends the producer span stashed in m.Opaque, at most once, recording
-// err on it (nil for success).
+// endSpan ends the producer span stashed in m.Opaque, recording err on it (nil
+// for success). The closure itself ends its span at most once (see
+// prepareMessage); clearing m.Opaque only spares this message a second call.
 func endSpan(m *ckafka.Message, err error) {
 	if end, ok := m.Opaque.(func(error)); ok {
 		end(err)
