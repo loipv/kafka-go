@@ -77,6 +77,18 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		return nil, ErrTopicsRequired
 	}
 
+	if config.DLQ != nil && config.DLQ.Topic == "" {
+		return nil, ErrDLQTopicRequired
+	}
+
+	if config.BatchSize <= 0 {
+		return nil, ErrInvalidBatchSize
+	}
+
+	if config.BatchTimeout <= 0 {
+		return nil, ErrInvalidBatchTimeout
+	}
+
 	// Build kafka config map (connection/auth via the connConfig seam)
 	configMap, err := buildConsumerConfig(config)
 	if err != nil {

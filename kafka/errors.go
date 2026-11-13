@@ -13,4 +13,11 @@ var (
 	ErrNoHandler           = errors.New("no handler registered; call OnMessage/OnBatch/OnGroupedBatch before Start")
 	ErrConsumerRunning     = errors.New("consumer is already running")
 	ErrSkippedOnMaxRetries = errors.New("message skipped after max retries")
+
+	// ErrDLQTopicRequired is returned by NewConsumer when DLQ is set without a topic.
+	ErrDLQTopicRequired = errors.New("dlq topic is required")
+	// ErrInvalidBatchSize is returned by NewConsumer when the batch size is not positive.
+	ErrInvalidBatchSize = errors.New("batch size must be greater than zero")
+	// ErrInvalidBatchTimeout is returned by NewConsumer when the batch timeout is not positive.
+	ErrInvalidBatchTimeout = errors.New("batch timeout must be greater than zero")
 )

@@ -565,3 +565,28 @@ func TestConsumer_BatchIdempotencySkipsProcessedKeys(t *testing.T) {
 		t.Errorf("handler saw %v, want only the first two values", got)
 	}
 }
+
+func TestNewConsumer_Validation(t *testing.T) {
+	base := []ConsumerOption{ConsumerWithBrokers("127.0.0.1:1"), ConsumerWithGroupID("g"), ConsumerWithTopics("t")}
+	tests := []struct {
+		name string
+		opt  ConsumerOption
+		want error
+	}{
+		{"empty DLQ topic", ConsumerWithDLQ(&DLQConfig{}), ErrDLQTopicRequired},
+		{"zero batch size", ConsumerWithBatchSize(0), ErrInvalidBatchSize},
+		{"negative batch size", ConsumerWithBatchSize(-1), ErrInvalidBatchSize},
+		{"zero batch timeout", ConsumerWithBatchTimeout(0), ErrInvalidBatchTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := NewConsumer(append(base, tt.opt)...)
+			if !errors.Is(err, tt.want) {
+				if c != nil {
+					_ = c.Close(context.Background())
+				}
+				t.Fatalf("NewConsumer() error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}

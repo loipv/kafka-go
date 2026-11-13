@@ -135,14 +135,16 @@ func ConsumerWithRebalanceTimeout(timeout time.Duration) ConsumerOption {
 	}
 }
 
-// ConsumerWithBatchSize sets the batch size
+// ConsumerWithBatchSize sets the batch size. It must be greater than zero;
+// NewConsumer returns ErrInvalidBatchSize otherwise.
 func ConsumerWithBatchSize(size int) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchSize = size
 	}
 }
 
-// ConsumerWithBatchTimeout sets the batch timeout
+// ConsumerWithBatchTimeout sets the batch timeout. It must be greater than
+// zero; NewConsumer returns ErrInvalidBatchTimeout otherwise.
 func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchTimeout = timeout
