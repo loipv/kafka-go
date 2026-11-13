@@ -37,7 +37,8 @@ type dlqService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *metricsCollector
-	closed   atomic.Bool // true once closed
+	closed   atomic.Bool   // true once closed
+	done     chan struct{} // closed at the start of Close: releases waiting produces
 }
 
 // dlqDeliveryTimeout bounds how long the poll loop waits for a DLQ delivery
@@ -74,6 +75,7 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) 
 		producer: producer,
 		config:   config,
 		metrics:  metrics,
+		done:     make(chan struct{}),
 	}, nil
 }
 
@@ -118,7 +120,8 @@ func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *c
 // by its delivery report; the sent-to-DLQ metric counts confirmed messages only,
 // keyed by source topic. It returns the errors.Join of every failure and nil
 // only when all messages were confirmed; the caller decides what a failure
-// means (the partition blocks).
+// means (the partition blocks). Closing the service ends the wait with an
+// error wrapping ErrDLQClosed: no report can arrive once the producer is gone.
 func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause error, attempts int) error {
 	if s.closed.Load() {
 		return ErrDLQClosed
@@ -148,6 +151,9 @@ func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause erro
 			// buffered channel and are dropped with it.
 			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", ctx.Err()))
 			return errors.Join(errs...)
+		case <-s.done:
+			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", ErrDLQClosed))
+			return errors.Join(errs...)
 		}
 	}
 	return errors.Join(errs...)
@@ -168,14 +174,19 @@ func confirmDLQEvent(e ckafka.Event) (string, error) {
 	return source, nil
 }
 
+// dlqCloseFlushTimeout bounds the flush in dlqService.Close. A variable so
+// tests can shorten it.
+var dlqCloseFlushTimeout = 10 * time.Second
+
 // Close closes the DLQ service
 func (s *dlqService) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	close(s.done)
 
-	s.producer.Flush(10000)
+	s.producer.Flush(int(dlqCloseFlushTimeout.Milliseconds()))
 	s.producer.Close()
 	return nil
 }

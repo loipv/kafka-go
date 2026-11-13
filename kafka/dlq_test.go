@@ -466,6 +466,7 @@ func TestDLQ_BuildMessageCapsErrorHeader(t *testing.T) {
 // must not count the message as sent.
 func TestDLQ_ProduceAllContextEndsBeforeDeliveryReports(t *testing.T) {
 	skipIfShort(t)
+	shortDLQCloseFlush(t) // the broker stays down: Close's flush can only time out
 	mc := newMockCluster(t)
 	dlqTopic := uniqueTopic(t, mc, 1)
 	metrics := newMetricsCollector()
@@ -487,5 +488,48 @@ func TestDLQ_ProduceAllContextEndsBeforeDeliveryReports(t *testing.T) {
 	}
 	if got := metrics.snapshot().SentToDLQ; got != 0 {
 		t.Errorf("SentToDLQ = %d, want 0 (nothing confirmed)", got)
+	}
+}
+
+// shortDLQCloseFlush shortens dlqService.Close's flush for one test, for tests
+// whose broker is down so the flush can only time out.
+func shortDLQCloseFlush(t *testing.T) {
+	t.Helper()
+	old := dlqCloseFlushTimeout
+	dlqCloseFlushTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { dlqCloseFlushTimeout = old })
+}
+
+// With the DLQ unreachable and a context that never ends, closing the service
+// must release a produceAll that is waiting for delivery reports: after Close
+// destroys the producer no report can arrive, and the poll loop would hang.
+func TestDLQ_ProduceAllReturnsWhenServiceCloses(t *testing.T) {
+	skipIfShort(t)
+	shortDLQCloseFlush(t)
+	mc := newMockCluster(t)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, newMetricsCollector())
+	if err != nil {
+		t.Fatalf("newDLQService: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.produceAll(context.Background(), []*Message{{Topic: "src", Value: []byte("a")}}, errors.New("boom"), 1)
+	}()
+	waitFor(t, 5*time.Second, func() bool { return s.producer.Len() > 0 }, "the DLQ record was never queued")
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrDLQClosed) {
+			t.Errorf("produceAll() = %v, want an error wrapping the DLQ-closed sentinel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("produceAll did not return after the DLQ service closed")
 	}
 }
