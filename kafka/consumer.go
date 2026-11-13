@@ -379,8 +379,8 @@ func (c *Consumer) reconcilePause() {
 	var perr error
 	if want {
 		perr = c.consumer.Pause(partitions)
-	} else {
-		perr = c.consumer.Resume(partitions)
+	} else if resumable := c.resumablePartitions(partitions); len(resumable) > 0 {
+		perr = c.consumer.Resume(resumable)
 	}
 	if perr == nil {
 		c.pauseApplied.Store(want)

@@ -114,6 +114,24 @@ func (c *Consumer) resumeBlocked() {
 	}
 }
 
+// resumablePartitions returns the assigned partitions that a user-level
+// Resume may resume: every partition except those blocked and still waiting
+// out their backoff.
+func (c *Consumer) resumablePartitions(assigned []ckafka.TopicPartition) []ckafka.TopicPartition {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	out := make([]ckafka.TopicPartition, 0, len(assigned))
+	for _, p := range assigned {
+		if p.Topic != nil {
+			if bs, ok := c.blocked[TopicPartition{Topic: *p.Topic, Partition: p.Partition}]; ok && !bs.resumed {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // clearBlockedOnPark drops the blocked state for a partition once its message
 // parked at or past the blocked offset — a success resets the escalation.
 func (c *Consumer) clearBlockedOnPark(msg *Message) {

@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -356,4 +357,83 @@ func TestBlockedPartition_NoDLQBatchBlocks(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+func TestBlockedPartition_ResumablePartitionsSkipsWaitingBlocks(t *testing.T) {
+	topic := "t"
+	tp := func(p int32) ckafka.TopicPartition { return ckafka.TopicPartition{Topic: &topic, Partition: p} }
+	c := &Consumer{blocked: map[TopicPartition]blockState{
+		{Topic: "t", Partition: 0}: {blocks: 1, resumed: false}, // still waiting out its backoff
+		{Topic: "t", Partition: 1}: {blocks: 1, resumed: true},  // backoff elapsed, already resumed
+	}}
+	got := c.resumablePartitions([]ckafka.TopicPartition{tp(0), tp(1), tp(2), {Partition: 9}})
+
+	var parts []int32
+	for _, p := range got {
+		parts = append(parts, p.Partition)
+	}
+	if !slices.Equal(parts, []int32{1, 2, 9}) {
+		t.Fatalf("resumable partitions = %v, want [1 2 9] (partition 0 is blocked and waiting)", parts)
+	}
+}
+
+// TestBlockedPartition_UserResumeDoesNotBypassBackoff pins that Pause followed
+// by Resume leaves a blocked partition paused until its own backoff elapses.
+func TestBlockedPartition_UserResumeDoesNotBypassBackoff(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithFromBeginning(true),
+		ConsumerWithAutoCommit(true),
+		ConsumerWithAutoCommitInterval(200*time.Millisecond),
+		// Handler tried twice 4s apart, then the partition blocks for 4s.
+		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 4 * time.Second}),
+	)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	var calls atomic.Int32
+	c.OnMessage(func(context.Context, *Message) error {
+		calls.Add(1)
+		return errors.New("always fails")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	waitFor(t, 20*time.Second, func() bool {
+		return len(c.Metrics().BlockedPartitions) > 0
+	}, "partition never reported blocked")
+	n := calls.Load()
+
+	c.Pause()
+	waitFor(t, 5*time.Second, c.pauseApplied.Load, "Pause never applied")
+	c.Resume()
+	waitFor(t, 5*time.Second, func() bool { return !c.pauseApplied.Load() }, "Resume never applied")
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := calls.Load(); got != n {
+			t.Fatalf("handler called %d times, want %d: user Resume bypassed the blocked partition's backoff", got, n)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	waitFor(t, 15*time.Second, func() bool { return calls.Load() > n },
+		"message never retried after the block's own backoff elapsed")
 }
