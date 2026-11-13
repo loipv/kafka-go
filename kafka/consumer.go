@@ -511,39 +511,80 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 	c.batch = make([]*Message, 0, c.config.BatchSize)
 	c.batchMu.Unlock()
 
-	// Start tracing span
-	var endSpan func(error)
-	if c.tracer != nil && len(batch) > 0 {
-		ctx, endSpan = c.tracer.startBatchConsumerSpan(ctx, c.config.GroupID, batch)
+	// Drop messages whose idempotency key was already processed. Duplicates
+	// are parked (offsets advance with the original batch) but never reach the
+	// handler, the error handler or the DLQ.
+	kept, keys := c.filterDuplicates(batch)
+	if dropped := len(batch) - len(kept); dropped > 0 {
+		c.logger.Debug("skipping duplicate messages in batch", "count", dropped)
 	}
 
 	var processingErr error
-	if c.groupedBatchHandler != nil {
-		processingErr = c.groupedBatchHandler(ctx, c.groupByKey(batch))
-	} else {
-		processingErr = c.batchHandler(ctx, batch)
+	if len(kept) > 0 {
+		// Start tracing span for what the handler receives
+		var endSpan func(error)
+		if c.tracer != nil {
+			ctx, endSpan = c.tracer.startBatchConsumerSpan(ctx, c.config.GroupID, kept)
+		}
+
+		if c.groupedBatchHandler != nil {
+			processingErr = c.groupedBatchHandler(ctx, c.groupByKey(kept))
+		} else {
+			processingErr = c.batchHandler(ctx, kept)
+		}
+
+		// End span with error if any
+		if endSpan != nil {
+			endSpan(processingErr)
+		}
 	}
 
-	// End span with error if any
-	if endSpan != nil {
-		endSpan(processingErr)
-	}
-
-	// Batch handler error
+	// Batch handler error: only the messages the handler saw go to the error
+	// handler / DLQ
 	blocked := false
 	if processingErr != nil {
-		blocked = c.handleBatchError(ctx, processingErr, batch)
+		blocked = c.handleBatchError(ctx, processingErr, kept)
 	}
 
 	if blocked {
 		c.blockMessages(ctx, batch)
 		return outcomeBlocked
 	}
+	if processingErr == nil && c.idempotencyStore != nil {
+		for _, key := range keys {
+			if key != "" {
+				c.idempotencyStore.add(key)
+			}
+		}
+	}
 	for _, msg := range batch {
 		c.clearBlockedOnPark(msg)
 	}
 	c.storeOffsets(batch)
 	return outcomeParked
+}
+
+// filterDuplicates drops messages whose idempotency key the store has already
+// recorded, and messages repeating a key seen earlier in the same batch.
+// keys[i] is the key of kept[i] ("" when the key function returns empty, which
+// is never filtered). With no store the batch is returned unchanged.
+func (c *Consumer) filterDuplicates(batch []*Message) (kept []*Message, keys []string) {
+	if c.idempotencyStore == nil || c.config.IdempotencyKey == nil {
+		return batch, make([]string, len(batch))
+	}
+	inBatch := make(map[string]struct{}, len(batch))
+	for _, msg := range batch {
+		key := c.config.IdempotencyKey(msg)
+		if key != "" {
+			if _, dup := inBatch[key]; dup || c.idempotencyStore.isDuplicate(key) {
+				continue
+			}
+			inBatch[key] = struct{}{}
+		}
+		kept = append(kept, msg)
+		keys = append(keys, key)
+	}
+	return kept, keys
 }
 
 // storeOffsets stores (does not commit) offsets for the given messages.

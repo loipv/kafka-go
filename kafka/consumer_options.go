@@ -149,7 +149,14 @@ func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 	}
 }
 
-// ConsumerWithIdempotencyKey sets the idempotency key extractor
+// ConsumerWithIdempotencyKey sets the idempotency key extractor. Messages whose
+// key was already processed are skipped (single and batch modes; in batch mode
+// also repeats within one batch), and an empty key is never filtered.
+//
+// The memory is in-process only: it is lost on restart or when a partition
+// rebalances to another instance, a failed batch is redelivered whole and
+// unfiltered, and memory grows with the number of distinct keys per TTL.
+// Treat it as best-effort de-duplication, not exactly-once.
 func ConsumerWithIdempotencyKey(fn IdempotencyKeyFunc) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.IdempotencyKey = fn

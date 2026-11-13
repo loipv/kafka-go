@@ -477,3 +477,91 @@ func TestConsumer_CommitInsideHandlerDuringClose(t *testing.T) {
 		t.Errorf("committed offset = %d, want 1", got)
 	}
 }
+
+func TestConsumer_FilterDuplicates(t *testing.T) {
+	msg := func(k string) *Message { return &Message{Key: []byte(k)} }
+	byKey := func(m *Message) string { return string(m.Key) }
+	tests := []struct {
+		name     string
+		seen     []string
+		keyFn    IdempotencyKeyFunc
+		in       []string
+		wantKept []string
+	}{
+		{"duplicate inside batch keeps first", nil, byKey, []string{"a", "b", "a"}, []string{"a", "b"}},
+		{"already processed key is dropped", []string{"a"}, byKey, []string{"a", "b"}, []string{"b"}},
+		{"all duplicates leaves nothing", []string{"a", "b"}, byKey, []string{"a", "b"}, nil},
+		{"empty key is never filtered", nil, func(*Message) string { return "" }, []string{"a", "a", "a"}, []string{"a", "a", "a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newIdempotencyStore(time.Hour)
+			defer s.close()
+			for _, k := range tt.seen {
+				s.add(k)
+			}
+			c := &Consumer{config: &ConsumerConfig{IdempotencyKey: tt.keyFn}, idempotencyStore: s}
+			var in []*Message
+			for _, k := range tt.in {
+				in = append(in, msg(k))
+			}
+			kept, keys := c.filterDuplicates(in)
+			if len(kept) != len(tt.wantKept) || len(keys) != len(kept) {
+				t.Fatalf("kept %d msgs / %d keys, want %d", len(kept), len(keys), len(tt.wantKept))
+			}
+			for i, m := range kept {
+				if string(m.Key) != tt.wantKept[i] {
+					t.Errorf("kept[%d] = %q, want %q", i, m.Key, tt.wantKept[i])
+				}
+			}
+		})
+	}
+}
+
+func TestConsumer_BatchIdempotencySkipsProcessedKeys(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+	p, _ := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	defer p.Close()
+	var mu sync.Mutex
+	var got []string
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()), ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithBatchSize(2), ConsumerWithBatchTimeout(200*time.Millisecond),
+		ConsumerWithIdempotencyKey(func(m *Message) string { return string(m.Key) }))...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(_ context.Context, msgs []*Message) error {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range msgs {
+			got = append(got, string(m.Value))
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer c.Close(context.Background())
+	defer cancel()
+	go func() { _ = c.Start(ctx) }()
+
+	produce := func(k, v string) {
+		if err := p.Produce(ctx, topic, &Message{Key: []byte(k), Value: []byte(v)}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	produce("a", "1")
+	produce("b", "2")
+	waitFor(t, 15*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(got) == 2 }, "first batch never handled")
+	produce("a", "3") // both already processed: the whole batch is filtered out
+	produce("b", "4")
+	waitFor(t, 15*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) == 4
+	}, "offsets did not advance past an all-duplicate batch")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Errorf("handler saw %v, want only the first two values", got)
+	}
+}

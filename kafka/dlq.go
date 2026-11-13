@@ -198,7 +198,13 @@ func (m *metricsCollector) getMetrics() *DLQMetrics {
 	}
 }
 
-// idempotencyStore stores processed message keys for idempotency
+// idempotencyStore remembers processed idempotency keys for one TTL. It is
+// per-process memory only: it is lost on restart or when a partition is
+// rebalanced to another instance, a failed batch is redelivered whole and
+// unfiltered, and memory grows with the number of distinct keys seen within
+// one TTL.
+//
+// ponytail: unbounded map, one write lock per sweep — cap with an LRU or move to an external store if key volume per TTL gets large
 type idempotencyStore struct {
 	store     map[string]time.Time
 	ttl       time.Duration
