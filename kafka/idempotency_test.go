@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestIdempotencyStore(t *testing.T) {
+func TestIdempotencyStore_RemembersKeysForTTL(t *testing.T) {
 	t.Run("duplicate within ttl", func(t *testing.T) {
 		s := newIdempotencyStore(time.Minute)
 		defer s.close()

@@ -29,27 +29,27 @@ type connConfig struct {
 // configMap returns the shared connection/auth keys. ckafka.ConfigMap is a
 // plain map — direct assignment cannot fail, so there are no SetKey errors
 // to ignore.
-func (cc connConfig) configMap() ckafka.ConfigMap {
+func (c connConfig) configMap() ckafka.ConfigMap {
 	cm := ckafka.ConfigMap{
-		"bootstrap.servers": strings.Join(cc.Brokers, ","),
+		"bootstrap.servers": strings.Join(c.Brokers, ","),
 	}
-	if cc.ClientID != "" {
-		cm["client.id"] = cc.ClientID
+	if c.ClientID != "" {
+		cm["client.id"] = c.ClientID
 	}
 	switch {
-	case cc.SASL != nil && cc.SSL:
+	case c.SASL != nil && c.SSL:
 		cm["security.protocol"] = "sasl_ssl"
-	case cc.SASL != nil:
+	case c.SASL != nil:
 		cm["security.protocol"] = "sasl_plaintext"
-	case cc.SSL:
+	case c.SSL:
 		cm["security.protocol"] = "ssl"
 	}
-	if cc.SASL != nil {
-		cm["sasl.mechanism"] = cc.SASL.Mechanism
-		cm["sasl.username"] = cc.SASL.Username
-		cm["sasl.password"] = cc.SASL.Password
+	if c.SASL != nil {
+		cm["sasl.mechanism"] = c.SASL.Mechanism
+		cm["sasl.username"] = c.SASL.Username
+		cm["sasl.password"] = c.SASL.Password
 	}
-	for k, v := range cc.Raw {
+	for k, v := range c.Raw {
 		cm[k] = v
 	}
 	return cm

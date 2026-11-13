@@ -20,9 +20,9 @@ func newMetricsCollector() *metricsCollector {
 	}
 }
 
-// getOrCreateTopicMetrics returns existing topic metrics or creates new one
+// topicMetrics returns existing topic metrics or creates new one
 // Uses double-checked locking for optimal performance
-func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *TopicMetrics {
+func (m *metricsCollector) topicMetrics(topic string) *TopicMetrics {
 	// Fast path: check with RLock (most common case - topic already exists)
 	m.mu.RLock()
 	metrics, ok := m.byTopic[topic]
@@ -49,14 +49,14 @@ func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *TopicMetrics {
 // incHandlerFailures counts one failed handler invocation for topic.
 func (m *metricsCollector) incHandlerFailures(topic string) {
 	atomic.AddInt64(&m.global.HandlerFailures, 1)
-	metrics := m.getOrCreateTopicMetrics(topic)
+	metrics := m.topicMetrics(topic)
 	atomic.AddInt64(&metrics.HandlerFailures, 1)
 }
 
 // incSentToDLQ counts one confirmed DLQ produce for the source topic.
 func (m *metricsCollector) incSentToDLQ(topic string) {
 	atomic.AddInt64(&m.global.SentToDLQ, 1)
-	metrics := m.getOrCreateTopicMetrics(topic)
+	metrics := m.topicMetrics(topic)
 	atomic.AddInt64(&metrics.SentToDLQ, 1)
 }
 

@@ -13,7 +13,7 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-func TestConnConfigMap(t *testing.T) {
+func TestConfig_ConnConfigMap(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  connConfig
@@ -73,7 +73,7 @@ func TestConnConfigMap(t *testing.T) {
 	}
 }
 
-func TestConnConfigMap_NoAuthOmitsSecurityProtocol(t *testing.T) {
+func TestConfig_ConnConfigMapNoAuthOmitsSecurityProtocol(t *testing.T) {
 	cm := connConfig{Brokers: []string{"b:9092"}}.configMap()
 	// ckafka.ConfigMap.Get returns (nil, nil) for a missing key — absence is a nil value.
 	if v, _ := cm.Get("security.protocol", nil); v != nil {
@@ -83,7 +83,7 @@ func TestConnConfigMap_NoAuthOmitsSecurityProtocol(t *testing.T) {
 
 // The auth-dropping regression: every builder in this package must carry auth.
 // A future client that forgets fails the moment it is added to this list.
-func TestAllBuildersPropagateAuth(t *testing.T) {
+func TestConfig_AllBuildersPropagateAuth(t *testing.T) {
 	sasl := &SASLConfig{Mechanism: "SCRAM-SHA-256", Username: "u", Password: "p"}
 	builders := []struct {
 		name  string
@@ -117,7 +117,7 @@ func TestAllBuildersPropagateAuth(t *testing.T) {
 // DLQ on a separate cluster: empty DLQ.Brokers inherits the consumer's
 // connection; a set DLQ.Brokers uses only the DLQ's own SSL/SASL/Raw so the
 // consumer's credentials never reach a foreign cluster.
-func TestDLQConn(t *testing.T) {
+func TestConfig_DLQConn(t *testing.T) {
 	consumerSASL := &SASLConfig{Mechanism: "PLAIN", Username: "cu", Password: "cp"}
 	dlqSASL := &SASLConfig{Mechanism: "SCRAM-SHA-512", Username: "du", Password: "dp"}
 	tests := []struct {
@@ -150,7 +150,7 @@ func TestDLQConn(t *testing.T) {
 	}
 }
 
-func TestBuildConsumerConfig(t *testing.T) {
+func TestConfig_BuildConsumerConfig(t *testing.T) {
 	base := func() *ConsumerConfig {
 		return &ConsumerConfig{Brokers: []string{"b:9092"}, GroupID: "g", Topics: []string{"t"},
 			SessionTimeout: defaultSessionTimeout}
@@ -279,7 +279,7 @@ func TestBuildConsumerConfig(t *testing.T) {
 	})
 }
 
-func TestBuildProducerConfig(t *testing.T) {
+func TestConfig_BuildProducerConfig(t *testing.T) {
 	t.Run("acks and compression and timeouts map to librdkafka keys", func(t *testing.T) {
 		cm := buildProducerConfig(&ProducerConfig{
 			Brokers: []string{"b:9092"}, Acks: AcksAll, Compression: CompressionZSTD,
@@ -311,7 +311,7 @@ func TestBuildProducerConfig(t *testing.T) {
 	})
 }
 
-func TestDLQTimeout(t *testing.T) {
+func TestConfig_DLQTimeout(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  *ConsumerConfig
@@ -384,7 +384,7 @@ func TestSASLConfig_RedactsPassword(t *testing.T) {
 	}
 }
 
-func TestWarnPlaintextSASL(t *testing.T) {
+func TestConfig_WarnPlaintextSASL(t *testing.T) {
 	const password = "hunter2-secret"
 	sasl := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: password}
 	tests := []struct {
@@ -415,7 +415,7 @@ func TestWarnPlaintextSASL(t *testing.T) {
 	}
 }
 
-func TestWarnPlaintextSASL_NilLogger(t *testing.T) {
+func TestConfig_WarnPlaintextSASLNilLogger(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))

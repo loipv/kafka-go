@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestNormalizeRetry(t *testing.T) {
+func TestConsumerOptions_NormalizeRetry(t *testing.T) {
 	def := RetryConfig{MaxRetries: 3, InitialInterval: time.Second, MaxInterval: 30 * time.Second, Multiplier: 2}
 	if got := normalizeRetry(nil); got != def {
 		t.Errorf("normalizeRetry(nil) = %+v, want %+v", got, def)
