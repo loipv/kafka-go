@@ -1,4 +1,4 @@
-// Command health serves HTTP endpoints reporting Kafka broker, topic, and
+// Command health serves HTTP endpoints reporting Kafka cluster, topic, and
 // consumer-lag health.
 package main
 
@@ -12,73 +12,53 @@ import (
 	"github.com/loipv/kafka-go/kafka"
 )
 
+// writeResult sends result as JSON, with 503 unless the check is UP.
+func writeResult(w http.ResponseWriter, result *kafka.HealthResult) {
+	w.Header().Set("Content-Type", "application/json")
+	if result.Status != kafka.HealthStatusUp {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}
+
 func main() {
-	// Create health checker (owns its producer connection)
+	// The health checker owns one connection, built from producer options.
 	healthChecker, err := kafka.NewHealthChecker(kafka.ProducerWithBrokers("localhost:9092"))
 	if err != nil {
 		log.Fatalf("Failed to create health checker: %v", err)
 	}
 	defer func() { _ = healthChecker.Close() }()
 
-	// Basic health check endpoint
+	// Each check is bounded by its context deadline (10s if there is none),
+	// so give every call a timeout.
+
+	// Cluster reachability: is at least one broker answering?
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		result := healthChecker.Check(ctx)
-
-		w.Header().Set("Content-Type", "application/json")
-		if result.Status != kafka.HealthStatusUp {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(result)
+		writeResult(w, healthChecker.Check(ctx))
 	})
 
-	// Broker connectivity check endpoint
-	http.HandleFunc("/health/brokers", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-
-		result := healthChecker.Check(ctx)
-
-		w.Header().Set("Content-Type", "application/json")
-		if result.Status != kafka.HealthStatusUp {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(result)
-	})
-
-	// Topic health check endpoint
+	// Topic health: does the topic exist, with its partitions and leaders?
 	http.HandleFunc("/health/topic", func(w http.ResponseWriter, r *http.Request) {
 		topic := r.URL.Query().Get("topic")
 		if topic == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "topic query param required",
-			})
+			http.Error(w, "topic query param required", http.StatusBadRequest)
 			return
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		result := healthChecker.CheckTopic(ctx, topic)
-
-		w.Header().Set("Content-Type", "application/json")
-		if result.Status != kafka.HealthStatusUp {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(result)
+		writeResult(w, healthChecker.CheckTopic(ctx, topic))
 	})
 
-	// Consumer lag check endpoint
+	// Consumer lag: DOWN when the group's total lag exceeds the limit.
 	http.HandleFunc("/health/lag", func(w http.ResponseWriter, r *http.Request) {
 		groupID := r.URL.Query().Get("group")
 		if groupID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "group query param required",
-			})
+			http.Error(w, "group query param required", http.StatusBadRequest)
 			return
 		}
 
@@ -86,13 +66,7 @@ func main() {
 		defer cancel()
 
 		// Max acceptable lag: 1000 messages
-		result := healthChecker.CheckConsumerLag(ctx, groupID, 1000)
-
-		w.Header().Set("Content-Type", "application/json")
-		if result.Status != kafka.HealthStatusUp {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(result)
+		writeResult(w, healthChecker.CheckConsumerLag(ctx, groupID, 1000))
 	})
 
 	// Readiness endpoint (for Kubernetes)
@@ -100,31 +74,25 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 
-		result := healthChecker.Check(ctx)
-
-		if result.Status == kafka.HealthStatusUp {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("OK"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("NOT READY"))
+		if healthChecker.Check(ctx).Status != kafka.HealthStatusUp {
+			http.Error(w, "NOT READY", http.StatusServiceUnavailable)
+			return
 		}
+		_, _ = w.Write([]byte("OK"))
 	})
 
-	// Liveness endpoint (for Kubernetes)
+	// Liveness endpoint (for Kubernetes): does not depend on Kafka
 	http.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
 
 	log.Println("Starting health check server on :8080")
 	log.Println("Endpoints:")
-	log.Println("  GET /health          - Basic Kafka health check")
-	log.Println("  GET /health/brokers  - Broker connectivity check")
+	log.Println("  GET /health                    - Kafka cluster health check")
 	log.Println("  GET /health/topic?topic=orders - Topic health check")
 	log.Println("  GET /health/lag?group=my-group - Consumer lag check")
-	log.Println("  GET /ready           - Kubernetes readiness probe")
-	log.Println("  GET /live            - Kubernetes liveness probe")
+	log.Println("  GET /ready                     - Kubernetes readiness probe")
+	log.Println("  GET /live                      - Kubernetes liveness probe")
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Server error: %v", err)

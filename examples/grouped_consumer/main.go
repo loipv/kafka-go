@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,29 +23,26 @@ type Order struct {
 }
 
 func main() {
-	// Create Kafka consumer with key-based grouping
-	// Messages with the same key are grouped together for batch processing
+	// The handler registered below (OnGroupedBatch) puts the consumer in
+	// batch mode and groups each batch by message key.
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers("localhost:9092"),
 		kafka.ConsumerWithGroupID("order-group-processors"),
 		kafka.ConsumerWithTopics("orders"),
 
-		// Batch size/timeout (key grouping follows the OnGroupedBatch handler)
+		// A batch is flushed at 50 messages or after 5 seconds.
 		kafka.ConsumerWithBatchSize(50),
 		kafka.ConsumerWithBatchTimeout(5*time.Second),
 
-		// Use cooperative sticky assignor for better rebalancing
+		// Cooperative sticky only revokes the partitions that move.
 		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
-
-		// Logging
-		kafka.ConsumerWithLogger(slog.Default()),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create consumer: %v", err)
 	}
 
-	// Register grouped batch handler
-	// Messages are grouped by key (customer ID in this case)
+	// Groups come in first-seen key order; messages keep their order within a
+	// group. A returned error fails the whole batch, so tolerate redelivery.
 	consumer.OnGroupedBatch(func(_ context.Context, groups []kafka.GroupedBatch) error {
 		log.Printf("Processing %d customer groups", len(groups))
 
@@ -76,7 +72,7 @@ func main() {
 		return nil
 	})
 
-	// Setup graceful shutdown
+	// Cancel the context on SIGINT/SIGTERM so Start returns.
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -87,16 +83,13 @@ func main() {
 		cancel()
 	}()
 
-	// Start consuming
-	log.Println("Starting grouped consumer...")
-	log.Println("Messages with the same key will be grouped together")
-	log.Println("Press Ctrl+C to stop")
+	log.Println("Starting grouped consumer... press Ctrl+C to stop")
 
 	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("Consumer error: %v", err)
+		log.Printf("Consumer error: %v", err)
 	}
 
-	// Close consumer
+	// Close after Start returns (also after an error): it flushes the partial batch.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 

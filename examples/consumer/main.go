@@ -1,13 +1,13 @@
-// Command consumer demonstrates batch consumption with DLQ,
-// idempotency, and tracing.
+// Command consumer demonstrates batch consumption with a DLQ, idempotency
+// and tracing.
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -25,69 +25,48 @@ type Order struct {
 }
 
 func main() {
-	// Create Kafka consumer with batch processing and DLQ
+	// The handler registered below (OnBatch) puts the consumer in batch mode.
 	consumer, err := kafka.NewConsumer(
-		// Connection
 		kafka.ConsumerWithBrokers("localhost:9092"),
 		kafka.ConsumerWithGroupID("order-processors"),
 		kafka.ConsumerWithTopics("orders"),
 
-		// Batch size/timeout (batch mode follows the OnBatch handler)
+		// A batch is flushed at 10 messages or after 3 seconds.
 		kafka.ConsumerWithBatchSize(10),
 		kafka.ConsumerWithBatchTimeout(3*time.Second),
 
-		// DLQ configuration
+		// A message the handler fails on is produced to the DLQ topic; its
+		// offset advances only once the DLQ produce is confirmed. If the DLQ
+		// is unreachable the partition blocks instead of dropping messages.
 		kafka.ConsumerWithDLQ(&kafka.DLQConfig{
 			Topic:            "orders-dlq",
 			IncludeErrorInfo: true,
 		}),
 
-		// Idempotency
+		// Best-effort de-duplication by the event-id header (in-process only).
 		kafka.ConsumerWithIdempotencyKey(func(msg *kafka.Message) string {
-			if eventID, ok := msg.Headers["event-id"]; ok {
-				return string(eventID)
-			}
-			return ""
+			return string(msg.Headers["event-id"])
 		}),
-		kafka.ConsumerWithIdempotencyTTL(1*time.Hour),
+		kafka.ConsumerWithIdempotencyTTL(time.Hour),
 
-		// Retry configuration
-		kafka.ConsumerWithRetry(&kafka.RetryConfig{
-			MaxRetries:      3,
-			InitialInterval: 1 * time.Second,
-			Multiplier:      2.0,
-		}),
-
-		// Tracing
 		kafka.ConsumerWithTracing(&kafka.TracingConfig{
 			Enabled:    true,
 			TracerName: "order-consumer",
-		}),
-
-		// Logging
-		kafka.ConsumerWithLogger(slog.Default()),
-
-		// Error handler — returning nil claims ownership (the message is
-		// parked and its offset advances); returning the error defers to the
-		// DLQ / block machinery.
-		kafka.ConsumerWithErrorHandler(func(_ context.Context, msg *kafka.Message, err error) error {
-			log.Printf("Error processing message (key=%s): %v", string(msg.Key), err)
-			return nil
 		}),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create consumer: %v", err)
 	}
 
-	// Register batch handler
+	// A returned error fails the whole batch: its messages go to the DLQ.
+	// Handlers must tolerate redelivery (at-least-once).
 	consumer.OnBatch(func(_ context.Context, msgs []*kafka.Message) error {
 		log.Printf("Processing batch of %d messages", len(msgs))
 
 		for _, msg := range msgs {
 			var order Order
 			if err := json.Unmarshal(msg.Value, &order); err != nil {
-				log.Printf("Failed to unmarshal order: %v", err)
-				continue
+				return fmt.Errorf("unmarshal order at offset %d: %w", msg.Offset, err)
 			}
 
 			log.Printf("Order %s: Customer=%s, Amount=$%.2f, Partition=%d, Offset=%d",
@@ -97,7 +76,7 @@ func main() {
 		return nil
 	})
 
-	// Setup graceful shutdown
+	// Cancel the context on SIGINT/SIGTERM so Start returns.
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -108,24 +87,26 @@ func main() {
 		cancel()
 	}()
 
-	// Start consuming
-	log.Println("Starting consumer...")
-	log.Println("Press Ctrl+C to stop")
+	log.Println("Starting consumer... press Ctrl+C to stop")
 
 	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("Consumer error: %v", err)
+		log.Printf("Consumer error: %v", err)
 	}
 
-	// Close consumer with timeout
+	// Shut down in order: the Start context is already cancelled, now Close
+	// flushes the partial batch and releases the client (also after a Start error).
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Print metrics before closing
-	metrics := consumer.Metrics()
-	log.Printf("Metrics: handler failures=%d, sent to DLQ=%d", metrics.HandlerFailures, metrics.SentToDLQ)
-
 	if err := consumer.Close(shutdownCtx); err != nil {
 		log.Printf("Error closing consumer: %v", err)
+	}
+
+	m := consumer.Metrics()
+	log.Printf("Metrics: handler failures=%d, sent to DLQ=%d, blocked partitions=%d",
+		m.HandlerFailures, m.SentToDLQ, len(m.BlockedPartitions))
+	for topic, tm := range m.ByTopic {
+		log.Printf("  %s: handler failures=%d, sent to DLQ=%d", topic, tm.HandlerFailures, tm.SentToDLQ)
 	}
 
 	log.Println("Consumer stopped")

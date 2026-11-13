@@ -85,7 +85,7 @@ func WithBatchDecoder[T any](
 		for _, msg := range msgs {
 			value, err := decode(msg.Value)
 			if err != nil {
-				// Log and skip invalid messages
+				// Skip invalid messages: parked with the rest of the batch, so lost
 				log.Printf("Skipping message due to decode error: %v", err)
 				continue
 			}
@@ -101,7 +101,8 @@ func WithBatchDecoder[T any](
 	}
 }
 
-// WithStrictBatchDecoder fails the entire batch if any message fails to decode
+// WithStrictBatchDecoder fails the entire batch if any message fails to
+// decode, so the error handler or DLQ gets the messages instead of losing them
 func WithStrictBatchDecoder[T any](
 	decode DecodeFunc[T],
 	handler func(context.Context, []T, []*kafka.Message) error,
@@ -212,7 +213,8 @@ func main() {
 		brokers = "localhost:9092"
 	}
 
-	// Pick a variant: default single-message; EXAMPLE=batch or EXAMPLE=grouped
+	// Pick a variant: default single-message; EXAMPLE=batch or EXAMPLE=grouped.
+	// Each registers one handler; the handler decides the consumer's mode.
 	switch os.Getenv("EXAMPLE") {
 	case "batch":
 		example2Batch(brokers)
@@ -220,6 +222,29 @@ func main() {
 		example3GroupedBatch(brokers)
 	default:
 		example1SingleMessage(brokers)
+	}
+}
+
+// run starts the consumer and blocks until SIGINT/SIGTERM, then closes it.
+func run(consumer *kafka.Consumer) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		log.Println("Shutting down...")
+		cancel()
+	}()
+
+	log.Println("Starting typed consumer... press Ctrl+C to stop")
+	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("Consumer error: %v", err)
+	}
+
+	// Close after Start returns (also after an error).
+	if err := consumer.Close(context.Background()); err != nil {
+		log.Printf("Error closing consumer: %v", err)
 	}
 }
 
@@ -233,26 +258,8 @@ func example1SingleMessage(brokers string) {
 		log.Fatal(err)
 	}
 
-	// Register typed handler
 	consumer.OnMessage(WithJSONDecoder(processOrder))
-
-	// Graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		log.Println("Shutting down...")
-		cancel()
-	}()
-
-	log.Println("Starting typed consumer...")
-	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatal(err)
-	}
-
-	_ = consumer.Close(context.Background())
+	run(consumer)
 }
 
 func example2Batch(brokers string) {
@@ -266,27 +273,14 @@ func example2Batch(brokers string) {
 		log.Fatal(err)
 	}
 
-	// Register typed batch handler (skips invalid messages)
+	// Skips messages that fail to decode (they are dropped for good) ...
 	consumer.OnBatch(WithBatchDecoder(JSONDecode[Order], processOrders))
 
-	// Or use strict mode (fails entire batch on decode error)
+	// ... or fails the whole batch on a decode error, so the DLQ or error
+	// handler sees it (see ConsumerWithDLQ):
 	// consumer.OnBatch(WithStrictBatchDecoder(JSONDecode[Order], processOrders))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		cancel()
-	}()
-
-	log.Println("Starting typed batch consumer...")
-	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatal(err)
-	}
-
-	_ = consumer.Close(context.Background())
+	run(consumer)
 }
 
 func example3GroupedBatch(brokers string) {
@@ -300,22 +294,6 @@ func example3GroupedBatch(brokers string) {
 		log.Fatal(err)
 	}
 
-	// Register typed grouped batch handler
 	consumer.OnGroupedBatch(WithGroupedBatchDecoder(JSONDecode[Order], processOrdersByCustomer))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		cancel()
-	}()
-
-	log.Println("Starting typed grouped consumer...")
-	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatal(err)
-	}
-
-	_ = consumer.Close(context.Background())
+	run(consumer)
 }

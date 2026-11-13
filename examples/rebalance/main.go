@@ -1,12 +1,13 @@
-// Command rebalance demonstrates a consumer that tracks per-partition state
-// across rebalances and commits offsets manually.
+// Command rebalance demonstrates a consumer that keeps per-partition state
+// across rebalances: it flushes buffers when partitions are revoked and
+// commits offsets manually.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -29,6 +30,10 @@ type PartitionManager struct {
 	mu     sync.RWMutex
 }
 
+func partitionKey(topic string, partition int32) string {
+	return fmt.Sprintf("%s-%d", topic, partition)
+}
+
 func NewPartitionManager() *PartitionManager {
 	return &PartitionManager{
 		states: make(map[string]*PartitionState),
@@ -36,7 +41,7 @@ func NewPartitionManager() *PartitionManager {
 }
 
 func (pm *PartitionManager) GetOrCreate(topic string, partition int32) *PartitionState {
-	key := topic + "-" + string(rune(partition))
+	key := partitionKey(topic, partition)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -53,7 +58,7 @@ func (pm *PartitionManager) GetOrCreate(topic string, partition int32) *Partitio
 }
 
 func (pm *PartitionManager) FlushPartition(topic string, partition int32) {
-	key := topic + "-" + string(rune(partition))
+	key := partitionKey(topic, partition)
 	pm.mu.Lock()
 	state, ok := pm.states[key]
 	pm.mu.Unlock()
@@ -70,32 +75,29 @@ func (pm *PartitionManager) FlushPartition(topic string, partition int32) {
 }
 
 func (pm *PartitionManager) RemovePartition(topic string, partition int32) {
-	key := topic + "-" + string(rune(partition))
+	key := partitionKey(topic, partition)
 	pm.mu.Lock()
 	delete(pm.states, key)
 	pm.mu.Unlock()
 }
 
 func main() {
-	// Partition manager to handle per-partition state
+	// Per-partition buffers, flushed when a partition is revoked
 	partitionManager := NewPartitionManager()
 
-	// Create Kafka consumer with rebalance callback
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers("localhost:9092"),
 		kafka.ConsumerWithGroupID("rebalance-aware-consumer"),
 		kafka.ConsumerWithTopics("orders"),
 
-		// Disable auto-commit for manual offset control
+		// No background commits: the handler calls Commit itself. (The
+		// library still commits stored offsets when partitions are revoked.)
 		kafka.ConsumerWithAutoCommit(false),
 
-		// Use cooperative sticky for smoother rebalancing
+		// Cooperative sticky only revokes the partitions that move.
 		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),
 
-		// Logging
-		kafka.ConsumerWithLogger(slog.Default()),
-
-		// Rebalance callback for partition management
+		// Runs before the library applies each assignment, so keep it short.
 		kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {
 			switch event.Type {
 			case kafka.RebalanceAssigned:
@@ -135,7 +137,6 @@ func main() {
 		log.Fatalf("Failed to create consumer: %v", err)
 	}
 
-	// Register message handler
 	consumer.OnMessage(func(_ context.Context, msg *kafka.Message) error {
 		// Get partition state
 		state := partitionManager.GetOrCreate(msg.Topic, msg.Partition)
@@ -149,21 +150,17 @@ func main() {
 		log.Printf("Received: topic=%s partition=%d offset=%d key=%s (buffer=%d)",
 			msg.Topic, msg.Partition, msg.Offset, string(msg.Key), bufferSize)
 
-		// With ConsumerWithAutoCommit(false) the library never stores offsets
-		// on its own — commit explicitly once the message is durably handled.
-		if err := consumer.Commit(msg); err != nil {
-			return err
-		}
-
-		// Flush when buffer is full
+		// Flush when the buffer is full, then commit: the offset moves past
+		// this message only once its data is durably handled.
 		if bufferSize >= 10 {
 			partitionManager.FlushPartition(msg.Topic, msg.Partition)
+			return consumer.Commit(msg)
 		}
 
 		return nil
 	})
 
-	// Setup graceful shutdown
+	// Cancel the context on SIGINT/SIGTERM so Start returns.
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -174,19 +171,13 @@ func main() {
 		cancel()
 	}()
 
-	// Start consuming
-	log.Println("Starting rebalance-aware consumer...")
-	log.Println("This consumer uses rebalance callbacks to:")
-	log.Println("  - Initialize resources when partitions are assigned")
-	log.Println("  - Flush buffers and cleanup when partitions are revoked")
-	log.Println("")
-	log.Println("Press Ctrl+C to stop")
+	log.Println("Starting rebalance-aware consumer... press Ctrl+C to stop")
 
 	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("Consumer error: %v", err)
+		log.Printf("Consumer error: %v", err)
 	}
 
-	// Close consumer
+	// Close after Start returns (also after an error).
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
