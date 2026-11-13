@@ -9,8 +9,10 @@
 //   - At-least-once delivery: an offset is stored only once a message is
 //     parked (processed, confirmed on the DLQ, claimed by the error handler,
 //     skipped as an idempotency duplicate, or dropped under the explicit
-//     RetryConfig.SkipOnMaxRetries opt-in); any other message blocks its
-//     partition with escalating backoff instead of being skipped
+//     RetryConfig.SkipOnMaxRetries opt-in); any other failed message blocks
+//     its partition with escalating backoff instead of being skipped, and a
+//     message whose handling shutdown interrupts is left unstored and
+//     redelivered
 //   - Dead Letter Queue: a single confirmed produce per message, optionally to
 //     a separate cluster
 //   - In-memory idempotency filter (per process, lost on restart)
