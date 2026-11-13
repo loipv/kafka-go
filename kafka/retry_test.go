@@ -185,7 +185,7 @@ func TestRetry_ContextCancel(t *testing.T) {
 	defer cancel()
 	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
 		after: func(time.Duration) <-chan time.Time {
-			cancel() // the context ends while the retry wait is in progress
+			cancel()                    // the context ends while the retry wait is in progress
 			return make(chan time.Time) // never fires
 		},
 		done:    make(chan struct{}),
