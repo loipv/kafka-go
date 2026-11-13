@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
 ## Project Overview
 
-A production-ready Go library for Kafka producer and consumer functionality built on top of [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go). Provides enterprise-grade features including at-least-once delivery, intelligent batch processing, idempotency guarantees, key-based grouping, and a Dead Letter Queue with circuit breaker.
+A Go library (`github.com/loipv/kafka-go`, package `kafka`) for Kafka producers and consumers, built on [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go) v2. It provides at-least-once delivery with partition blocking, a Dead Letter Queue (DLQ), an in-memory idempotency filter, OpenTelemetry tracing and health checks. `README.md` is the user documentation; this file is for people changing the code.
 
 ## Development Commands
 
@@ -13,12 +13,15 @@ Make targets mirror CI:
 ```bash
 make build             # go build ./...
 make test              # go test ./... (unit + mock-broker tiers)
-make test-short        # go test -short ./... (unit only)
+make test-short        # go test -short ./... (unit only; mock-broker tests skip)
 make test-race         # go test -race ./...
 make test-integration  # go test -tags=integration ./kafka/... (needs Docker)
 make vet               # go vet ./... && go vet -tags=integration ./kafka/...
-make lint              # golangci-lint run
+make lint              # golangci-lint run (revive, errorlint, copyloopvar, nilerr; build tag integration)
 make cover             # race + coverage report
+make cover-check       # race + coverage; fails below 80% (COVER_MIN) over ./kafka/...
+make vuln              # govulncheck ./... (needs network)
+make tidy              # go mod tidy
 ```
 
 ```bash
@@ -26,39 +29,62 @@ make cover             # race + coverage report
 go test -v -run TestName ./kafka
 
 # Run examples (need a local broker on localhost:9092)
-go run examples/producer/main.go
-go run examples/consumer/main.go
-go run examples/grouped_consumer/main.go
-go run examples/health/main.go
-go run examples/rebalance/main.go
-go run examples/typed_consumer/main.go
+go run examples/producer/main.go     # also: consumer, grouped_consumer, health, rebalance, typed_consumer
 ```
 
 ## Requirements
 
-- Go 1.24+ (go.mod: `go 1.24.0`, `toolchain go1.24.10`)
-- librdkafka (statically vendored by confluent-kafka-go for common platforms; builds need `CGO_ENABLED=1`)
+- Go 1.24+ (see `go.mod`)
+- librdkafka (statically vendored by confluent-kafka-go for common platforms; builds need `CGO_ENABLED=1`, the Makefile sets it)
 
 ## Architecture
 
-### Core Components
+All library code lives in `kafka/`. There are **no interfaces for the producer/consumer**: `NewProducer`/`NewConsumer` return the concrete `*Producer` and `*Consumer`; a user who needs a seam declares their own interface. Confluent's package is aliased **`ckafka`** everywhere (both packages are named `kafka`).
 
-All library code lives in the `kafka/` package. There are **no interfaces for the producer/consumer** — `NewProducer`/`NewConsumer` return the concrete `*Producer` (producer.go) and `*Consumer` (consumer.go). A user who needs a seam declares their own interface on the consuming side. Because both our package and confluent's are named `kafka`, confluent's package is aliased **`ckafka`** throughout (`ckafka.Message`, `ckafka.ConfigMap`, ...).
+### Core Components (one concern per file)
 
-- **Producer**: `producer.go` - `Produce()`, `ProduceBatch()`, `ProduceMultiTopicBatch()` (synchronous, `errors.Join` for batches) and `ProduceAsync()` (delivery failures go to `ProducerWithDeliveryErrorHandler`, otherwise logged). `Close()` waits on the delivery-report goroutine.
-- **Consumer**: `consumer.go` - Handler-based processing via `OnMessage`/`OnBatch`/`OnGroupedBatch`, dispatched through the `invokeHandler` seam. Also `Commit(msgs...)`, `Pause()`/`Resume()` (broker-fetch pause, reconciled in the poll loop), `DLQMetrics()`, `CircuitState(topic)`.
-- **Types**: `types.go` - Core types (`Message`, `Headers`, `GroupedBatch`, `TopicBatch`, `TopicPartition`) and enums.
-- **Config seam**: `config.go` - `connConfig` with a `configMap()` method; every internal client (producer, consumer, DLQ producer, DLQ retry consumer, health checks) builds its config through it, so SSL/SASL is inherited everywhere.
-- **Options**: `options.go` (producer), `consumer_options.go` (consumer) - functional options; `ProducerWithRawConfig`/`ConsumerWithRawConfig` merge raw librdkafka keys last.
-- **Errors**: `errors.go` - sentinel errors (`ErrBrokersRequired`, `ErrNoHandler`, ...); tests assert on these.
+- `doc.go` - package doc and `Version`.
+- `types.go` - `Message`, `Headers`, `GroupedBatch`, `TopicPartition`, `Metrics`/`TopicMetrics`, handler function types, `RebalanceEvent`/`RebalanceType`, enums (`Acks`, `Compression`, `PartitionAssignor`, `HealthStatus`).
+- `errors.go` - sentinel errors; tests assert on them.
+- `config.go` - `connConfig` with `configMap()` (every internal client builds its librdkafka config through it, so SSL/SASL is inherited everywhere), `buildProducerConfig`/`buildConsumerConfig` (derives `max.poll.interval.ms`), `SASLConfig` (password redacted when printed or logged), `TracingConfig`, `warnPlaintextSASL`.
+- `producer.go` - `Producer`: `Produce`, `ProduceBatch` (synchronous, back-pressure when the client queue is full, `errors.Join` of failures), `ProduceAsync` (failures go to `ProducerWithDeliveryErrorHandler`, else logged), `Flush`, `Close`.
+- `producer_options.go` - `ProducerConfig` and `ProducerWith*` options.
+- `consumer.go` - `Consumer`: `OnMessage`/`OnBatch`/`OnGroupedBatch`, `Start`, `Close`, `Commit`, `Pause`/`Resume`, `Metrics`, the poll loop, batch assembly, rebalance callback.
+- `consumer_options.go` - `ConsumerConfig`, `DLQConfig`, `RetryConfig` and `ConsumerWith*` options.
+- `retry.go` - in-place retry of the single-message handler and `retryBudget` (feeds `max.poll.interval.ms`).
+- `block.go` - blocked-partition bookkeeping: pause, seek back, escalating backoff, resume.
+- `dlq.go` - `dlqService`: one DLQ produce per message, confirmed by its delivery report; `x-dlq-*` headers.
+- `idempotency.go` - in-memory key store with TTL.
+- `metrics.go` - `metricsCollector` behind `Consumer.Metrics()`.
+- `health.go` - `HealthChecker`: `Check`, `CheckTopic`, `CheckConsumerLag`.
+- `tracing.go` - OpenTelemetry spans and trace-context propagation through message headers.
 
 ### Delivery Model (at-least-once)
 
-`enable.auto.offset.store=false` always. An offset is stored (via `StoreOffsets`) only when a message is *parked*: handler succeeded, written to DLQ with the produce confirmed, `ErrorHandler` returned `nil`, or `SkipOnMaxRetries` parked it as unprocessable. Anything unparkable (no DLQ, DLQ send failed, circuit breaker open) **blocks its partition**: pause + seek + escalating backoff (`InitialInterval` doubling to `MaxInterval`, default 30s), reconciled in the same poll-loop pass as pause/resume so the loop never sleeps and `max.poll.interval.ms` is never blown. Batch mode fails the whole batch (re-delivered wholesale; use idempotency for the duplicates). `ConsumerWithAutoCommit(false)` also disables the offset store — the handler must call `Commit()` itself.
+`enable.auto.offset.store=false` always. An offset is stored (via `StoreOffsets`) only when a message is *parked*: the handler succeeded, the DLQ produce was confirmed, the `ErrorHandler` returned `nil`, it was an idempotency duplicate, or `SkipOnMaxRetries` dropped it (the explicit opt-in to loss). Anything unparkable (no DLQ, DLQ produce failed) **blocks its partition**: pause, seek back, retry after an escalating wait (`InitialInterval` doubling to `MaxInterval`, default 30s). Other partitions keep flowing, and the wait itself never sleeps the poll loop: it is reconciled each pass of the loop along with pause/resume.
 
-### Key Patterns
+Not everything is non-blocking. Single-message handler retries and the DLQ delivery wait run **on the poll loop** and stop consumption of every partition while they last. `max.poll.interval.ms` is derived to cover them: max(explicit `ConsumerWithRebalanceTimeout`, (retry budget + DLQ delivery timeout) x 1.5, 300s). The DLQ delivery timeout is 30s unless `DLQConfig.Raw` sets `message.timeout.ms`/`delivery.timeout.ms`.
 
-**Functional Options**: `NewProducer`/`NewConsumer` take variadic options:
+The consumer's mode follows the registered handler (one active handler; there are no batch flags). In batch mode a batch handler is not retried in place. A failed batch is offered to the `ErrorHandler` message by message, its unclaimed messages go to the DLQ in one pass, and otherwise the whole batch blocks and is redelivered. Idempotency keys are recorded only for successful batches, so the in-memory filter does not deduplicate a redelivered failed batch; handlers must tolerate duplicates.
+
+`ConsumerWithAutoCommit(false)` turns off only the automatic commit: parked offsets are still stored, the handler must call `Commit()` itself, and the library still commits stored offsets when partitions are revoked.
+
+### Message Flow
+
+1. **Producer**: `Message` -> `prepareMessage` (span closure in `Opaque` for delivery-report correlation) -> `produceAndAwait` -> delivery report -> result.
+2. **Consumer**: `ReadMessage` -> `convertMessage` -> idempotency check -> handler (with retry in single-message mode) -> parked: store offset / unparkable: block partition.
+
+### Concurrency
+
+- User handlers (message, batch, grouped batch, `ErrorHandler`) run on the goroutine that called `Start`, the only one that polls. The exception is the final batch flush in `Close`, which runs on the goroutine calling `Close` after the consume loop exited (or after `Close`'s 5s wait for it).
+- `batchFlushLoop` (batch mode only) is a ticker that does a non-blocking send on `flushCh`; the poll loop does the flush. Rebalance callbacks run on whichever goroutine is polling the client.
+- `Pause`, `Resume`, `Metrics` and `Commit` are safe from any goroutine; `On*` registration is not synchronised and must precede `Start`.
+- `Producer` runs one delivery-report goroutine (`handleDeliveryReports`), waited on in `Close`. The idempotency store runs one cleanup goroutine, stopped by its `close`.
+- State flags are `atomic.Bool` (`running` is a CAS with a deferred reset); `mu` guards `loopExited`, `batchMu` the batch, `blockMu` the blocked map.
+
+## Key Patterns
+
+**Functional options**: `NewProducer`/`NewConsumer` take variadic options:
 ```go
 producer, err := kafka.NewProducer(
     kafka.ProducerWithBrokers("localhost:9092"),
@@ -66,38 +92,11 @@ producer, err := kafka.NewProducer(
 )
 ```
 
-**Handler Registration**: Consumer handlers are registered before `Start()` (which validates one is set — `ErrNoHandler` otherwise):
-- `OnMessage(MessageHandler)` - single messages
-- `OnBatch(BatchHandler)` - batches
-- `OnGroupedBatch(GroupedBatchHandler)` - key-grouped batches
+**Handler registration** (before `Start`, which returns `ErrNoHandler` otherwise): `OnMessage(MessageHandler)`, `OnBatch(BatchHandler)`, `OnGroupedBatch(GroupedBatchHandler)`. A later registration replaces the earlier one.
 
-### Configuration Naming Conventions
-
-- Producer options: `ProducerWith*` (e.g., `ProducerWithBrokers`, `ProducerWithAcks`)
-- Consumer options: `ConsumerWith*` (e.g., `ConsumerWithBrokers`, `ConsumerWithGroupID`, `ConsumerWithRetry`)
-- Logging: `ProducerWithLogger`/`ConsumerWithLogger(*slog.Logger)`; default `slog.Default()`, off is `slog.New(slog.DiscardHandler)`
-
-### Message Flow
-
-1. **Producer**: Message -> `produceAndAwait()` -> confluent producer (span closure in `Opaque` for delivery-report correlation) -> delivery report -> confirmation
-2. **Consumer**: confluent consumer -> `convertMessage()` -> idempotency check -> handler via `invokeHandler` (with retry) -> parked? store offset : block partition
-
-### Concurrency
-
-- One goroutine ever calls user handlers: the poll loop (batch flush is a ticker + non-blocking send on `flushCh`)
-- `Producer` uses a mutex for state plus a `sync.WaitGroup` for the delivery-report goroutine
-- `Consumer` uses `mu` for state and `batchMu` for batch assembly; `running` is an atomic CAS with a deferred reset
-
-### Testing
-
-Three tiers: unit (pure logic), mock broker (`kafka.NewMockCluster`, no Docker, skipped under `-short`), and integration (`//go:build integration`, testcontainers + Redpanda, needs Docker). Both `go vet` and lint run with the `integration` tag.
-
-### Typed Handlers Pattern
-
-The library keeps `Message.Value` as `[]byte`. For typed deserialization, use generic wrapper functions (see `examples/typed_consumer/`):
+**Typed handlers**: the library keeps `Message.Value` as `[]byte`. For typed decoding, wrap handlers (see `examples/typed_consumer/`):
 
 ```go
-// Generic pattern for typed handlers
 func WithJSONDecoder[T any](handler func(context.Context, T, *kafka.Message) error) kafka.MessageHandler {
     return func(ctx context.Context, msg *kafka.Message) error {
         var v T
@@ -108,3 +107,21 @@ func WithJSONDecoder[T any](handler func(context.Context, T, *kafka.Message) err
     }
 }
 ```
+
+## Testing
+
+Three tiers: unit (pure logic), mock broker (`kafka.NewMockCluster`, no Docker, skipped under `-short`) and integration (`//go:build integration`, testcontainers + Redpanda, needs Docker). Both `go vet` and lint run with the `integration` tag. Shared helpers are in `testhelpers_test.go` (`skipIfShort`, `newMockCluster`, `uniqueTopic`, `waitFor`, `fastAtLeastOnce`, ...). Runnable documentation lives in `example_test.go`.
+
+## Conventions
+
+- One concern per source file. Tests for `x.go` live in `x_test.go`; the only other test files are `testhelpers_test.go`, `integration_test.go` and `example_test.go`. Declaration-only files need no test file.
+- Test names are `Test<Object>_<Behaviour>`. Mock-broker tests start with `skipIfShort(t)`.
+- Export only what a user calls; internal types are unexported.
+- Options are named `ProducerWith*` / `ConsumerWith*` and their doc comment states the default. Every exported identifier has a doc comment (lint enforces it).
+- No `get` prefix. Receivers are one letter (`p`, `c`, `h`, `s`).
+- Sentinel errors live in `errors.go` and are wrapped with `%w`.
+- Logging is structured `slog`. Never log a message's key, value or headers, or anything derived from them.
+- Comments explain why and never cite task or ticket numbers.
+- State flags are `atomic.Bool`.
+- A commit either moves code or changes behaviour, never both. Bug fixes come with a test that failed before the fix.
+- Before committing, run `make build vet lint` and `make cover-check`.
