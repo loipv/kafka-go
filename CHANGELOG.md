@@ -1,5 +1,194 @@
 # Changelog
 
+## v1.2.0 (2026-11-13)
+
+> **v1.2.0 contains breaking API changes despite the minor version number.**
+> The library has no known users yet, so the module path stays
+> `github.com/loipv/kafka-go` and there is no `/v2`. If you are upgrading from
+> v1.0.0, apply the [v1.1.0 migration](#migration) first (v1.1.0 was never
+> tagged), then [Migrating from 1.1](#migrating-from-11).
+
+v1.2.0 trims the API to what a user calls, drops the DLQ retry machinery and the
+circuit breaker, makes the consumer mode follow the registered handler, and
+fixes a set of defects found in a second audit (several of them security
+related). Delivery stays at-least-once.
+
+### Removed
+
+- **DLQ auto-retry and the final DLQ**: `ConsumerWithDLQRetry`, `DLQRetryConfig`
+  (and `ConsumerConfig.DLQRetry`), and the DLQ retry consumer behind them,
+  together with the `Reprocess*` metrics. A failed message is produced to the DLQ
+  once; reprocessing DLQ messages is the application's job (consume the DLQ
+  topic with a regular `Consumer`).
+- **Circuit breaker**: `CircuitBreakerConfig` (and `ConsumerConfig.CircuitBreaker`),
+  `CircuitBreaker` / `NewCircuitBreaker` and its methods, `CircuitState` with
+  `CircuitClosed` / `CircuitOpen` / `CircuitHalfOpen`, `Consumer.CircuitState`
+  and `Consumer.ResetCircuit`. A DLQ that cannot be written now blocks the
+  affected partitions with escalating backoff instead.
+- `DLQConfig.MaxRetries`, `DLQConfig.RetryDelay`,
+  `DLQConfig.RetryBackoffMultiplier` and the `DefaultDLQMaxRetries`,
+  `DefaultDLQRetryDelay`, `DefaultDLQBackoffMultiplier` constants: a DLQ produce
+  is a single attempt.
+- `ConsumerWithBatchProcessing` and `ConsumerWithGroupByKey` (and the
+  `ConsumerConfig.BatchProcessing` / `GroupByKey` fields): the registered
+  handler decides the mode.
+- `Producer.ProduceMultiTopicBatch` and `TopicBatch`: call `ProduceBatch` once
+  per topic.
+- `ProducerWithRetry` and `ProducerConfig.Retry`. `RetryConfig` is now
+  consumer-only.
+- `HealthChecker.CheckBrokers` (use `Check`), `HealthChecker.SetTimeout` (use the
+  context deadline) and `NewHealthCheckerFromProducer` (use `NewHealthChecker`).
+- `PartitionAny`: the producer always partitions by key and ignores
+  `Message.Partition`.
+- Exported internals, which are now unexported:
+  - types `DLQService`, `DLQMetricsCollector` (with `NewDLQMetricsCollector` and
+    its methods), `IdempotencyStore` (with `NewIdempotencyStore`, `Add`,
+    `IsDuplicate`, `Remove`, `Size`, `Close`) and `TracingService` (with
+    `NewTracingService`, `StartProducerSpan`, `StartConsumerSpan`,
+    `StartBatchConsumerSpan`, `InjectTraceContext`, `ExtractTraceContext`);
+  - constants `DefaultConnectionTimeout`, `DefaultRequestTimeout`,
+    `DefaultSessionTimeout`, `DefaultHeartbeatInterval`, `DefaultRebalanceTimeout`,
+    `DefaultBatchSize`, `DefaultBatchTimeout`, `DefaultIdempotencyTTL`,
+    `DefaultAutoCommitInterval`, `DefaultRetryMaxRetries`,
+    `DefaultRetryInitialInterval`, `DefaultRetryMultiplier`,
+    `DefaultRetryMaxInterval` (the defaults are documented on each option) and the
+    span attribute keys `MessagingSystemKey`, `MessagingDestinationNameKey`,
+    `MessagingDestinationPartitionID`, `MessagingOperationNameKey`,
+    `MessagingOperationTypeKey`, `MessagingKafkaOffsetKey`,
+    `MessagingConsumerGroupKey`, `MessagingKafkaMessageKeyKey`,
+    `MessagingBatchMessageCountKey`.
+
+### Changed
+
+- **The consumer mode follows the registered handler.** `OnMessage`, `OnBatch`
+  and `OnGroupedBatch` select single-message, batch and key-grouped delivery; one
+  handler is active and a later registration replaces the earlier one.
+  `ConsumerWithBatchSize` and `ConsumerWithBatchTimeout` still size the batches.
+- **`Consumer.DLQMetrics()` is now `Consumer.Metrics()`** and returns a flat
+  `Metrics` (`HandlerFailures`, `SentToDLQ`, `ByTopic map[string]TopicMetrics`,
+  `BlockedPartitions`) instead of `DLQMetrics{Global, ByTopic, BlockedPartitions}`.
+  `Global.HandlerRetries` became `HandlerFailures`, `Global.MessagesSentToDLQ`
+  became `SentToDLQ`, and the per-topic `HandlerRetries` became `HandlerFailures`;
+  the JSON keys changed with them (see the migration table).
+- `HandlerFailures` counts failed handler invocations **per message**: every
+  failed attempt of a single-message handler (including the first), and one per
+  message of a failed batch (batch failures were not counted before).
+- `SentToDLQ` per-topic metrics are keyed by the **source topic** (the topic the
+  message was consumed from), not the DLQ topic.
+- `Compression` is a string type (`"none"`, `"gzip"`, `"snappy"`, `"lz4"`,
+  `"zstd"`) instead of an `int`; the constant names are unchanged.
+- `RebalanceEvent.Type` is a `RebalanceType`, with the constants
+  `RebalanceAssigned` and `RebalanceRevoked`.
+- Health checks are bounded by the context deadline: a deadline longer than 10s is
+  no longer capped at 10s, and without a deadline each broker query gets a 10s
+  default. `CheckConsumerLag` describes only the requested group instead of
+  listing every group on the cluster.
+- A DLQ produce is a **single attempt**, confirmed by its delivery report and
+  bounded by a 30s delivery timeout (override with `DLQConfig.Raw`
+  `message.timeout.ms`; its alias `delivery.timeout.ms` is honoured too). The wait
+  runs on the poll loop, so the derived `max.poll.interval.ms` now covers it:
+  max(`ConsumerWithRebalanceTimeout`, (retry budget + DLQ delivery timeout) x 1.5,
+  300s).
+- A failed batch is sent to the DLQ in one pass (all messages queued, then one
+  delivery report awaited per message) instead of one round trip per message.
+- `Produce` and `ProduceBatch` apply back-pressure when the client queue is full:
+  they wait for in-flight deliveries to drain it instead of failing with "Queue
+  full". A message that can never fit still fails with the queue-full error.
+- `Start` returns an error wrapping the client error when librdkafka reports a
+  fatal one. Call `Close` afterwards.
+- `Commit()` with nothing to commit returns `nil` instead of librdkafka's "no
+  offset stored" error.
+- `Start` returns `ErrConsumerClosed` after `Close`, and `Commit` returns it once
+  the consumer has been closed.
+- `NewConsumer` validates more: it returns the new sentinel errors
+  `ErrDLQTopicRequired` (a `DLQConfig` without a topic), `ErrInvalidBatchSize`
+  and `ErrInvalidBatchTimeout` (non-positive batch settings).
+- Tracing no longer records the message key as a span attribute unless
+  `TracingConfig.IncludeMessageKey` is set (see Security).
+- Contributors only: source and test files were reorganised (one concern per
+  file, `x_test.go` per `x.go`), CI enforces an 80% coverage floor and doc
+  comments on every export, and `CLAUDE.md` documents the conventions.
+
+### Fixed
+
+- `Producer.Close` could stall for the full flush timeout and lose async delivery
+  failures, because it stopped the delivery-report reader before flushing. It
+  now flushes first and logs a warning with the number of messages it gave up on
+  if the flush times out.
+- `ProduceBatch` failed messages with "Queue full" when a batch was larger than
+  the client queue.
+- `ConsumerWithIdempotencyKey` was ignored in batch mode. Duplicates (across
+  batches and within one batch) are now removed before the batch handler runs
+  and are parked with the batch.
+- A user `Resume()` bypassed the backoff of a blocked partition and resumed it
+  early. A blocked partition now stays paused until its own wait elapses.
+- `Start` spun forever, logging, after a fatal client error; it now returns.
+- Batch handler failures were missing from `HandlerFailures`.
+- `CheckConsumerLag` ignored context cancellation between partitions and kept
+  querying; it now stops with a DOWN result.
+- A DLQ delivery event that was not a message report was counted as a success;
+  the message is now treated as unconfirmed (its partition blocks and retries).
+
+### Security
+
+- The message key is no longer recorded in producer and consumer spans by
+  default (keys may contain personal data); opt in with
+  `TracingConfig.IncludeMessageKey`.
+- The `x-dlq-error-message` header (`DLQConfig.IncludeErrorInfo`) is capped at
+  1024 bytes, cut on a rune boundary.
+- `NewProducer`, `NewConsumer` and `NewHealthChecker` log a warning when SASL is
+  configured without TLS (credentials would travel unencrypted); the warning
+  never includes the username or password. The same applies to a DLQ cluster
+  configured through `DLQConfig`.
+- The SASL password is redacted by `SASLConfig` when printed with `%v`, `%+v` or
+  `%#v` and when logged through `slog` (new `String`, `GoString` and `LogValue`
+  methods), including inside a config that holds one.
+- Idempotency keys are no longer written to the debug log; the duplicate-skip
+  line now logs topic, partition and offset.
+- CI runs with least-privilege permissions (`contents: read`) and a `govulncheck`
+  job (`make vuln` runs the same check locally).
+
+### Added
+
+- `TracingConfig.IncludeMessageKey`, `Metrics`, `TopicMetrics`, `RebalanceType`,
+  `RebalanceAssigned`, `RebalanceRevoked`, `ErrDLQTopicRequired`,
+  `ErrInvalidBatchSize` and `ErrInvalidBatchTimeout` (described above).
+- Doc comments on every exported identifier, compiled `Example` functions for
+  the producer, async producer, consumer, batch and grouped-batch consumers,
+  `Commit` and the health checker, and a README rewritten to match.
+
+### Migrating from 1.1
+
+Every "new" form below compiles against the final v1.2.0 API.
+
+| 1.1 | 1.2 |
+|---|---|
+| `ConsumerWithBatchProcessing(true)` + `OnBatch(h)` | `OnBatch(h)`; keep `ConsumerWithBatchSize` / `ConsumerWithBatchTimeout` |
+| `ConsumerWithBatchProcessing(true)` + `ConsumerWithGroupByKey(true)` + grouped handler | `OnGroupedBatch(h)` |
+| `c.DLQMetrics()` | `c.Metrics()` |
+| `m.Global.HandlerRetries` | `m.HandlerFailures` (now counts every failed invocation, batch failures included) |
+| `m.Global.MessagesSentToDLQ` | `m.SentToDLQ` |
+| `m.ByTopic[t].HandlerRetries` | `m.ByTopic[t].HandlerFailures` |
+| `m.ByTopic[t].SentToDLQ` | `m.ByTopic[t].SentToDLQ`; `t` is now the source topic, not the DLQ topic |
+| `m.BlockedPartitions` | unchanged |
+| `m.Global.Reprocess*`, `m.ByTopic[t].ReprocessAttempts` | removed with DLQ retry |
+| types `DLQMetrics`, `DLQGlobalMetrics`, `DLQTopicMetrics` | `Metrics`, `TopicMetrics` |
+| metrics JSON `{"global":{"handlerRetries":..,"messagesSentToDlq":..},"byTopic":{"t":{"handlerRetries":..}}}` | `{"handlerFailures":..,"sentToDlq":..,"byTopic":{"t":{"handlerFailures":..,"sentToDlq":..}}}` |
+| `kafka.CompressionGZIP` etc. | no change: the constant names are the same. Only code that used the numeric value (`Compression(1)`, `int(c)`, numbers read from config) must switch to the constant or the codec name (`kafka.Compression("gzip")`) |
+| `event.Type == "assigned"` | still compiles; prefer `event.Type == kafka.RebalanceAssigned` / `kafka.RebalanceRevoked`. Passing `event.Type` where a `string` is expected needs `string(event.Type)` |
+| `hc.SetTimeout(d)` | `ctx, cancel := context.WithTimeout(ctx, d)` and pass `ctx` to `Check`, `CheckTopic`, `CheckConsumerLag` |
+| `hc.CheckBrokers(ctx)` | `hc.Check(ctx)` |
+| `NewHealthCheckerFromProducer(p)` | `NewHealthChecker(kafka.ProducerWithBrokers(...), ...)` with the same connection options; it owns its connection, so `defer hc.Close()` |
+| `ProducerWithRetry(&RetryConfig{...})` | `ProducerWithRawConfig(map[string]any{"retries": 5, "retry.backoff.ms": 100, "retry.backoff.max.ms": 1000})`, or `ProducerWithIdempotent(true)` |
+| `DLQConfig{MaxRetries, RetryDelay, RetryBackoffMultiplier}` | delete the fields; the DLQ produce is one attempt, a failure blocks the partition and is retried with the consumer's `RetryConfig` backoff. To change the 30s delivery timeout set `DLQConfig.Raw` `message.timeout.ms` |
+| `ConsumerWithDLQRetry(&DLQRetryConfig{...})` and the final DLQ | delete; to reprocess DLQ messages run a separate `Consumer` on the DLQ topic with your own policy |
+| `CircuitBreakerConfig`, `c.CircuitState(t)`, `c.ResetCircuit(t)` | delete; watch `c.Metrics().BlockedPartitions` and the `partition blocked` log lines instead |
+| `ProduceMultiTopicBatch(ctx, []TopicBatch{{Topic: t, Messages: ms}})` | loop: `p.ProduceBatch(ctx, t, ms)` per topic (combine with `errors.Join` if you want all errors) |
+| `PartitionAny` | delete; the partition is chosen from the key |
+| span attribute `messaging.kafka.message.key` present by default | set `TracingConfig{Enabled: true, IncludeMessageKey: true}` to keep it |
+| `DefaultBatchSize`, `Default*`, `Messaging*Key` constants, `NewIdempotencyStore`, `NewTracingService`, `NewDLQMetricsCollector` | removed; use the option defaults documented on each `ConsumerWith*` / `ProducerWith*` and the attribute names `"messaging.kafka.offset"`, `"messaging.kafka.consumer.group"`, ... as strings |
+| `Start` blocking forever after a fatal client error | `Start` returns the error; call `Close` afterwards |
+
 ## v1.1.0 (unreleased)
 
 v1.1.0 fixes all 33 confirmed defects from a full code review, deletes dead
