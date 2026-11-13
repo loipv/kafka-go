@@ -185,8 +185,8 @@ func ProducerWithTracing(tracing *TracingConfig) ProducerOption {
 
 // ProducerWithRawConfig merges raw librdkafka producer configuration keys.
 // Raw overrides the connection/auth keys only (bootstrap.servers, SSL/SASL);
-// builder-level keys (acks, compression.type, enable.idempotence, retries)
-// are set after the merge and win. Use it for keys this library does not
+// builder-level keys (acks, plus compression.type, enable.idempotence and the
+// timeouts when their option is set) are applied after the merge and win. Use it for keys this library does not
 // model (e.g. "linger.ms", "queue.buffering.max.messages").
 func ProducerWithRawConfig(raw map[string]any) ProducerOption {
 	return func(c *ProducerConfig) { c.Raw = raw }
