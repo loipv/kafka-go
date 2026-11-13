@@ -2,7 +2,9 @@ package kafka
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
@@ -68,6 +70,26 @@ func (c *ConsumerConfig) dlqConn() connConfig {
 	return connConfig{Brokers: c.DLQ.Brokers, SSL: c.DLQ.SSL, SASL: c.DLQ.SASL, Raw: c.DLQ.Raw}
 }
 
+// dlqTimeout is how long one DLQ delivery can block the poll loop: 0 without a
+// DLQ, otherwise the DLQ connection's message.timeout.ms (int or numeric
+// string, as librdkafka accepts both) or dlqDeliveryTimeout.
+func (c *ConsumerConfig) dlqTimeout() time.Duration {
+	if c.DLQ == nil {
+		return 0
+	}
+	var ms int
+	switch v := c.dlqConn().Raw["message.timeout.ms"].(type) {
+	case int:
+		ms = v
+	case string:
+		ms, _ = strconv.Atoi(v)
+	}
+	if ms <= 0 {
+		return dlqDeliveryTimeout
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	cm := c.conn().configMap()
 	cm["acks"] = int(c.Acks)
@@ -108,18 +130,19 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 		cm["partition.assignment.strategy"] = string(c.PartitionAssignor)
 	}
 
-	// max.poll.interval.ms is contested by two features (explicit
-	// RebalanceTimeout, the in-loop retry budget).
-	// Take the max of both, floored at librdkafka's 300s default, so
+	// max.poll.interval.ms is contested by three features (explicit
+	// RebalanceTimeout, the in-loop retry budget, the in-loop DLQ delivery
+	// wait). Take the max of them, floored at librdkafka's 300s default, so
 	// wiring a low explicit value can never make batch consumers MORE
-	// fragile: max(explicit, retryBudget*1.5, 300s).
+	// fragile: max(explicit, (retryBudget+dlqTimeout)*1.5, 300s). dlqTimeout
+	// is counted once, however many messages a failed batch sends to the DLQ.
 	mpiMs := 300000
 	if c.RebalanceTimeout > 0 {
 		if explicit := int(c.RebalanceTimeout.Milliseconds()); explicit > mpiMs {
 			mpiMs = explicit
 		}
 	}
-	if b := retryBudget(normalizeRetry(c.Retry)); b > 0 {
+	if b := retryBudget(normalizeRetry(c.Retry)) + c.dlqTimeout(); b > 0 {
 		if need := int(float64(b.Milliseconds()) * 1.5); need > mpiMs {
 			mpiMs = need
 		}

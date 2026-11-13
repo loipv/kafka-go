@@ -20,11 +20,26 @@ type dlqService struct {
 	closed   int32 // atomic: 0=open, 1=closed
 }
 
+// dlqDeliveryTimeout bounds how long the poll loop waits for a DLQ delivery
+// report unless the DLQ connection's Raw config sets message.timeout.ms.
+const dlqDeliveryTimeout = 30 * time.Second
+
+// dlqProducerConfig builds the DLQ producer's librdkafka config. The DLQ send
+// runs inside the consumer's poll loop, so message.timeout.ms is capped at
+// dlqDeliveryTimeout (rather than librdkafka's 5 minutes) unless Raw sets it.
+func dlqProducerConfig(cc connConfig) ckafka.ConfigMap {
+	cm := cc.configMap()
+	cm["acks"] = -1 // All replicas
+	if _, ok := cm["message.timeout.ms"]; !ok {
+		cm["message.timeout.ms"] = int(dlqDeliveryTimeout.Milliseconds())
+	}
+	return cm
+}
+
 // newDLQService creates a new DLQ service. It builds its producer from the
 // same connConfig as the parent consumer, so SSL/SASL is never dropped.
 func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) (*dlqService, error) {
-	cm := cc.configMap()
-	cm["acks"] = -1 // All replicas
+	cm := dlqProducerConfig(cc)
 
 	producer, err := ckafka.NewProducer(&cm)
 	if err != nil {

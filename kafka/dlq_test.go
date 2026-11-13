@@ -120,3 +120,14 @@ func TestDLQMetricsBlockedGauge(t *testing.T) {
 		t.Errorf("BlockedPartitions after clear = %v, want empty", got)
 	}
 }
+
+func TestDLQProducerConfig(t *testing.T) {
+	cm := dlqProducerConfig(connConfig{Brokers: []string{"b:9092"}})
+	if cm["acks"] != -1 || cm["message.timeout.ms"] != 30000 {
+		t.Errorf("defaults = acks %v, timeout %v; want -1, 30000", cm["acks"], cm["message.timeout.ms"])
+	}
+	cm = dlqProducerConfig(connConfig{Brokers: []string{"b:9092"}, Raw: map[string]any{"message.timeout.ms": 5000}})
+	if cm["message.timeout.ms"] != 5000 {
+		t.Errorf("raw override lost: %v", cm["message.timeout.ms"])
+	}
+}

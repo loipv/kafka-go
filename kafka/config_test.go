@@ -181,6 +181,19 @@ func TestBuildConsumerConfig(t *testing.T) {
 			t.Errorf("max.poll.interval.ms = %v, want 450000", v)
 		}
 	})
+	t.Run("DLQ delivery timeout is part of the max.poll.interval.ms floor", func(t *testing.T) {
+		// (300s retry budget + 30s DLQ timeout) * 1.5 → 495000
+		c := base()
+		c.Retry = &RetryConfig{MaxRetries: 10, InitialInterval: 30 * time.Second, Multiplier: 1}
+		c.DLQ = &DLQConfig{Topic: "d"}
+		cm, err := buildConsumerConfig(c)
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 495000 {
+			t.Errorf("max.poll.interval.ms = %v, want 495000", v)
+		}
+	})
 	t.Run("explicit low RebalanceTimeout cannot drop below the 300s floor", func(t *testing.T) {
 		c := base()
 		c.RebalanceTimeout = 10 * time.Second
@@ -235,4 +248,30 @@ func TestBuildProducerConfig(t *testing.T) {
 			t.Errorf("request.timeout.ms should be omitted when zero, got %v", v)
 		}
 	})
+}
+
+func TestDLQTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *ConsumerConfig
+		want time.Duration
+	}{
+		{"no DLQ", &ConsumerConfig{}, 0},
+		{"default", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}}, 30 * time.Second},
+		{"raw int", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": 5000}}, 5 * time.Second},
+		{"raw string", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": "5000"}}, 5 * time.Second},
+		{"separate cluster uses DLQ raw", &ConsumerConfig{Raw: map[string]any{"message.timeout.ms": 5000},
+			DLQ: &DLQConfig{Topic: "d", Brokers: []string{"x:9092"}}}, 30 * time.Second},
+		{"unparsable string falls back", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": "soon"}}, 30 * time.Second},
+		{"other type falls back", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": 5.5}}, 30 * time.Second},
+		{"zero falls back", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": 0}}, 30 * time.Second},
+		{"negative falls back", &ConsumerConfig{DLQ: &DLQConfig{Topic: "d"}, Raw: map[string]any{"message.timeout.ms": -1}}, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.dlqTimeout(); got != tt.want {
+				t.Errorf("dlqTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
