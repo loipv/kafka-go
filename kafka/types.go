@@ -209,8 +209,9 @@ type Metrics struct {
 	// HandlerFailures counts failed handler invocations per message. With a
 	// single-message handler every failed attempt counts, including the first,
 	// not only the retries after it. With a batch handler a failed batch counts
-	// once for each message handed to the handler. It equals the sum of the
-	// per-topic values in ByTopic.
+	// once for each message handed to the handler. A handler error returned
+	// after the Start context ended is shutdown, not a failure, and is not
+	// counted. It equals the sum of the per-topic values in ByTopic.
 	HandlerFailures int64 `json:"handlerFailures"`
 	// SentToDLQ counts messages whose DLQ produce was confirmed.
 	SentToDLQ int64 `json:"sentToDlq"`

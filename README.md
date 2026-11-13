@@ -649,7 +649,7 @@ A consumer span is parented to the trace context found in the message headers; a
 
 | Field | Meaning |
 |---|---|
-| `HandlerFailures` | Failed handler invocations. A single-message handler counts every failed attempt, including the first; a failed batch counts once per message handed to the handler. Equals the sum of `ByTopic`. |
+| `HandlerFailures` | Failed handler invocations. A single-message handler counts every failed attempt, including the first; a failed batch counts once per message handed to the handler. An error returned after the `Start` context ended is shutdown and is not counted. Equals the sum of `ByTopic`. |
 | `SentToDLQ` | Messages whose DLQ produce was confirmed. |
 | `ByTopic` | Both counters per source topic (the topic the message was consumed from, not the DLQ topic). Topics with nothing to report may be absent. |
 | `BlockedPartitions` | A snapshot, not a counter: the partitions blocked at the time of the call. |

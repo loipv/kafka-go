@@ -219,3 +219,24 @@ func TestRetry_CloseDuringWaitIsInterrupted(t *testing.T) {
 		t.Errorf("executeWithRetry() = %v, want an error wrapping errInterrupted and the handler error", err)
 	}
 }
+
+// A handler error returned after the context ended is shutdown, not a handler
+// failure: it is not counted, as in batch mode.
+func TestRetry_ErrorAfterContextEndIsNotCountedAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
+		after: time.After, done: make(chan struct{}),
+		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
+	c.messageHandler = func(ctx context.Context, _ *Message) error {
+		cancel() // shutdown arrives while the handler runs
+		return ctx.Err()
+	}
+
+	if _, err := c.executeWithRetry(ctx, &Message{Topic: "t"}); !errors.Is(err, errInterrupted) {
+		t.Errorf("executeWithRetry() = %v, want an error wrapping errInterrupted", err)
+	}
+	if n := c.Metrics().HandlerFailures; n != 0 {
+		t.Errorf("HandlerFailures = %d, want 0: shutdown is not a handler failure", n)
+	}
+}

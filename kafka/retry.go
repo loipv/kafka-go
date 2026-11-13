@@ -29,7 +29,9 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 		}
 
 		lastErr = err
-		c.metrics.incHandlerFailures(msg.Topic)
+		if ctx.Err() == nil { // an error after the context ended is shutdown, not a failure
+			c.metrics.incHandlerFailures(msg.Topic)
+		}
 
 		if attempt < maxRetries {
 			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
