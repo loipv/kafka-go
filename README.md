@@ -180,7 +180,7 @@ if err := consumer.Close(closeCtx); err != nil {
 | `Produce(ctx, topic, msg)` | Sends one message and blocks until its delivery report arrives. Returns the delivery error if the broker did not acknowledge it. If `ctx` ends first it returns the context's error, and the message may still be delivered afterwards. |
 | `ProduceBatch(ctx, topic, msgs)` | Sends all messages and blocks until every report has arrived. Returns `nil` for an empty batch or when all were acknowledged, otherwise the `errors.Join` of every failure (use `errors.Is` / `errors.As`). The joined errors carry only topic and partition, so an error does not say which messages failed: treat each message's delivery as unknown (some may have been delivered). |
 | `ProduceAsync(topic, msg)` | Queues the message and returns at once. A `nil` return only means "queued". Delivery failures go to the handler set with `ProducerWithDeliveryErrorHandler`, or are logged at error level when there is none. |
-| `Flush(timeout)` | Waits up to `timeout` for every queued message, `ProduceAsync` ones included. Returns an error stating how many are still queued, or `nil`. |
+| `Flush(timeout)` | Waits up to `timeout` for every queued message, `ProduceAsync` ones included. Returns an error stating how many are still queued, or `nil`. After `Close` it returns `ErrProducerClosed`. |
 | `Close()` | Flushes for up to 10 seconds, logs a warning with the number of messages still undelivered (they are lost), then closes. Safe to call more than once; always returns `nil`. |
 
 The message's `Partition`, `Offset` and `Topic` fields are ignored when producing: the `topic` argument decides the topic, and librdkafka picks the partition from the key. A zero `Timestamp` lets librdkafka use the current time.
@@ -209,7 +209,7 @@ if err := producer.Flush(10 * time.Second); err != nil {
 Things to know:
 
 - **Back-pressure.** When librdkafka's local queue is full, `Produce` and `ProduceBatch` wait for in-flight delivery reports to drain it and retry. A message that can never fit (for example one larger than `queue.buffering.max.kbytes`) fails at once with a queue-full error. `ProduceAsync` has no back-pressure: it returns the queue-full error immediately and the caller decides what to do.
-- **Close.** Do not call a produce method concurrently with `Close`; stop the producing goroutines first. `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` are otherwise safe for concurrent use. After `Close`, produce methods return `ErrProducerClosed`.
+- **Close.** Do not call a produce method concurrently with `Close`; stop the producing goroutines first. `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` are otherwise safe for concurrent use. After `Close`, the produce methods and `Flush` return `ErrProducerClosed`.
 - **The delivery error handler** runs on the producer's single delivery-report goroutine. A slow handler delays later reports, and it must not call `Close`.
 - **Retries** belong to librdkafka. Tune them, and the delivery timeout, through `ProducerWithRawConfig`:
 
@@ -271,6 +271,8 @@ consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) e
 2. Call `Close(ctx)`. It waits up to 5 seconds for the poll loop to leave, flushes the batch still in memory (batch modes), closes the DLQ producer and the idempotency store, and closes the client. `ctx` bounds only that final flush, so give it a deadline (create the context just before calling `Close`, as the quick start does) and do not pass an already-cancelled context.
 
 If `Close` is called while a long retry is still in flight and the `Start` context was not cancelled, `Close` falls back to its 5-second wait and may close the client under that retry. `Close` is safe to call more than once; later calls return `nil`.
+
+Shutdown is not a handler failure. A message or batch whose handler, or retry wait, is in flight when the `Start` context is cancelled (or whose retry wait `Close` interrupts) is neither parked nor blocked: its offset is not stored, the error handler and the DLQ are not invoked, and it is redelivered when the group next consumes the partition. The same holds for the final batch flush in `Close` when its `ctx` ends and the batch handler then fails. Let handlers honour their `ctx` so shutdown is prompt.
 
 ### Pause and Resume
 
@@ -345,6 +347,8 @@ An offset is stored only when a message is **parked**. A message is parked when:
 
 Stored offsets are committed by auto commit (the default) or by `Commit`. With auto commit off, the library also commits them when partitions are revoked.
 
+A message whose handling is interrupted by shutdown is neither parked nor blocked: its offset is not stored and it is redelivered (see [Start and shutdown](#start-and-shutdown)).
+
 ### What blocks a partition
 
 When a failed message is not claimed by the error handler and is not confirmed on the DLQ (there is no DLQ, or the DLQ produce failed), it cannot be parked, and its partition is blocked: the library pauses the partition, seeks back to the failed message, and retries after a wait. The first wait is `RetryConfig.InitialInterval`; it doubles on each consecutive block of the same message up to `RetryConfig.MaxInterval` (defaults 1s and 30s), and resets when the message finally parks. The wait between redeliveries of a blocked partition does not hold up the poll loop: other partitions keep flowing while it runs, and `max.poll.interval.ms` is not exceeded by it. (Handler retries and the DLQ delivery wait are different; see [Handler retries](#handler-retries).) A revoked partition drops its blocked state. `Consumer.Metrics().BlockedPartitions` lists the blocked partitions.
@@ -367,7 +371,7 @@ Retries apply to single-message handlers only. A batch handler is not retried in
 
 Retry waits run on the poll loop. While a message is being retried, no partition of this consumer is consumed, and the same holds while a message waits for its DLQ confirmation. With the defaults the retry waits add up to about 7 seconds (1s + 2s + 4s), and the DLQ wait is bounded by 30 seconds, so one failing message can hold up the whole consumer for up to about 37 seconds. With `MaxRetries: 10` and `MaxInterval: 30s` the retry waits alone add up to about 3 minutes (1s, 2s, 4s, 8s, 16s, then 30s for the remaining five) per message. This is why `max.poll.interval.ms` is derived from these waits (see [below](#maxpollintervalms)). Keep the retry budget small, and prefer the DLQ over long retries.
 
-When a single-message handler has failed all its attempts, the message goes to the error handler (if set; `nil` claims it), then to the DLQ (if set; a confirmed produce parks it), and otherwise blocks its partition.
+When a single-message handler has failed all its attempts, the message goes to the error handler (if set; `nil` claims it), then to the DLQ (if set; a confirmed produce parks it), and otherwise blocks its partition. A message whose attempts shutdown cut short goes to neither; it is redelivered (see [Start and shutdown](#start-and-shutdown)).
 
 ```go
 consumer, err := kafka.NewConsumer(
@@ -391,7 +395,7 @@ if err != nil {
 _ = consumer
 ```
 
-The error handler is called once per message that failed: in batch modes, once for each message of a failed batch. Note that `err` can carry text derived from message content; see [Security](#security).
+The error handler is called once per message that failed: in batch modes, once for each message of a failed batch. It is not called for a message or batch whose handling shutdown interrupted. Note that `err` can carry text derived from message content; see [Security](#security).
 
 ### SkipOnMaxRetries
 
@@ -409,7 +413,7 @@ The consumer must poll within `max.poll.interval.ms` or the group considers it f
 - 300 seconds;
 - 1.5 × (the sum of the handler retry waits + the DLQ delivery timeout), because those waits run on the poll loop.
 
-With the defaults the 300-second floor applies. The estimate counts the waits only, not the time your handler runs, so raise `ConsumerWithRebalanceTimeout` if a handler or a batch handler can run longer. `NewConsumer` returns an error when `ConsumerWithSessionTimeout` is not below the resulting value.
+With the defaults the 300-second floor applies. The estimate counts the waits only, not the time your handler runs, so raise `ConsumerWithRebalanceTimeout` if a handler or a batch handler can run longer. `NewConsumer` returns an error when `ConsumerWithSessionTimeout` is not below the resulting value. librdkafka caps `max.poll.interval.ms` at 24 hours (86400000 ms): when `ConsumerWithRebalanceTimeout` or the value derived from the retry waits and the DLQ timeout exceeds it, `NewConsumer` returns an error naming the cause instead of clamping.
 
 ## Dead Letter Queue
 
@@ -519,7 +523,7 @@ Options are applied in order, so a later option overrides an earlier one for the
 | `ConsumerWithSASL(*SASLConfig)` | nil | SASL authentication. |
 | `ConsumerWithSessionTimeout(d)` | 30s | `session.timeout.ms`. Must be below the computed `max.poll.interval.ms`. Zero or less leaves librdkafka's default. |
 | `ConsumerWithHeartbeatInterval(d)` | 3s | `heartbeat.interval.ms`. Zero or less leaves librdkafka's default. |
-| `ConsumerWithRebalanceTimeout(d)` | 0 (computed) | Lower bound for `max.poll.interval.ms`; see [above](#maxpollintervalms). |
+| `ConsumerWithRebalanceTimeout(d)` | 0 (computed) | Lower bound for `max.poll.interval.ms`, at most 24h; see [above](#maxpollintervalms). |
 | `ConsumerWithBatchSize(n)` | 100 | Messages that trigger a batch flush. Must be above zero (`ErrInvalidBatchSize`). Batch handlers only. |
 | `ConsumerWithBatchTimeout(d)` | 5s | Interval at which a partial batch is flushed. Must be above zero (`ErrInvalidBatchTimeout`). Batch handlers only. |
 | `ConsumerWithIdempotencyKey(fn)` | nil (off) | Key extractor for de-duplication. |
@@ -683,7 +687,7 @@ defer producer.Close()
 | Method | UP when |
 |---|---|
 | `Check(ctx)` | The cluster answered a metadata request. Details: `brokers`, `topics`, `originatingId`. |
-| `CheckTopic(ctx, topic)` | The topic's metadata is present without an error. Details: `topic`, `partitionCount`, `partitions`. |
+| `CheckTopic(ctx, topic)` | The topic's metadata is present without an error. Details: `topic`, `partitionCount`, `partitions`. The check never creates the topic, even when the broker auto-creates topics: a missing topic is DOWN. |
 | `CheckConsumerLag(ctx, groupID, maxLag)` | The group exists and its total lag (high watermark minus committed offset, summed over partitions) is not above `maxLag`. Details: `groupId`, `state`, `memberCount`, `lag`, `maxLag`, `partitions`. |
 
 Each check returns a `*HealthResult` (never `nil`) with `Status` (`HealthStatusUp` or `HealthStatusDown`), `Details` and `Error`; every failure is reported as DOWN, not as a Go error. The context's deadline bounds each check; without a deadline the metadata and watermark queries get a 10-second default each, while the group describe and offset listing in `CheckConsumerLag` use the admin client's own default timeouts. `HealthResult` marshals to JSON.
@@ -721,10 +725,10 @@ Sentinel errors are package variables; test for them with `errors.Is`.
 | `ErrNoHandler` | By `Consumer.Start` when no handler was registered. |
 | `ErrConsumerRunning` | By `Consumer.Start` when the consumer is already running. |
 | `ErrConsumerClosed` | By `Consumer.Start` after `Close`, and by `Consumer.Commit` once the consumer has been closed. |
-| `ErrProducerClosed` | By `Produce`, `ProduceBatch` and `ProduceAsync` after the producer was closed. |
+| `ErrProducerClosed` | By `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` after the producer was closed. |
 | `ErrSkippedOnMaxRetries` | Wraps the last handler error passed to the error handler and the DLQ when `SkipOnMaxRetries` drops a message. `Start` does not return it. |
 
-`NewProducer` and `NewConsumer` also return an error when librdkafka rejects the resulting configuration (for example an unsupported compression codec). `NewConsumer` itself rejects a session timeout that is not below the computed `max.poll.interval.ms`.
+`NewProducer` and `NewConsumer` also return an error when librdkafka rejects the resulting configuration (for example an unsupported compression codec). `NewConsumer` itself rejects a session timeout that is not below the computed `max.poll.interval.ms`, and a `max.poll.interval.ms` above librdkafka's 24-hour limit.
 
 ## Typed handlers
 
