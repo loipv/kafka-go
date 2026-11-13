@@ -17,12 +17,19 @@ import (
 // OnBatch or OnGroupedBatch), run it with Start and release it with Close.
 //
 // An offset is stored only when a message is parked: the handler succeeded, the
-// message was confirmed on the DLQ, the error handler claimed it, or
-// SkipOnMaxRetries dropped it. A message that cannot be parked blocks its
-// partition (paused, retried with an escalating wait) instead of being skipped.
-// All handlers are called from the single goroutine running Start. Pause,
-// Resume, Metrics and Commit may be called from any goroutine; the On*
-// registrations are not synchronised and must happen before Start.
+// message was confirmed on the DLQ, the error handler claimed it, it was
+// skipped as an idempotency duplicate, or SkipOnMaxRetries dropped it. A message
+// that cannot be parked blocks its partition (paused, retried with an
+// escalating wait) instead of being skipped.
+//
+// Handlers (message, batch, grouped batch, error handler) run on the goroutine
+// running Start, with one exception: the final batch flush performed by Close
+// runs on the goroutine that called Close, after the consume loop has exited
+// (or after Close's 5s wait for it). Rebalance callbacks run on whichever
+// goroutine is polling the client: normally Start's, and Close's while the
+// client shuts down. Pause, Resume, Metrics and Commit may be called from any
+// goroutine; the On* registrations are not synchronised and must happen before
+// Start.
 type Consumer struct {
 	consumer *ckafka.Consumer
 	config   *ConsumerConfig
@@ -293,13 +300,14 @@ func (c *Consumer) Start(ctx context.Context) error {
 }
 
 // Close stops the consumer and releases its resources. It signals Start to
-// return and waits up to 5 seconds for the consume loop to leave, then (in
-// batch mode) flushes the batch still in memory, closes the DLQ producer and
-// the idempotency store, and closes the client.
+// return and, when Start is running, waits up to 5 seconds for the consume loop
+// to leave, then (in batch mode) flushes the batch still in memory, closes the
+// DLQ producer and the idempotency store, and closes the client. The final
+// flush runs on the goroutine calling Close.
 //
 // ctx bounds only that final batch flush: it is the context passed to the batch
-// handler and the DLQ for the remaining messages, so a cancelled ctx cuts the
-// flush short. Cancel the Start context before calling Close when handlers or
+// handler, the error handler and the DLQ for the remaining messages, so a
+// cancelled ctx cuts the flush short. Cancel the Start context before calling Close when handlers or
 // retries can run long: without a cancel, Close falls back to the bounded 5s
 // wait and may then close the handle while a long retry is still in flight.
 //
@@ -349,15 +357,19 @@ func (c *Consumer) Close(ctx context.Context) error {
 
 // Pause stops fetching new messages from the assigned partitions. The change is
 // applied by the poll loop, which keeps polling, so the consumer stays in its
-// group, a partial batch is still flushed on its timeout, and blocked
-// partitions are not resumed until Resume. It also survives rebalances. Calling
-// it before Start takes effect once partitions are assigned.
+// group and a partial batch is still flushed on its timeout. Partitions that
+// are blocked on an unparkable message are not resumed while the consumer is
+// paused, even when their backoff has elapsed. The pause survives rebalances.
+// Calling it before Start takes effect once partitions are assigned.
 func (c *Consumer) Pause() {
 	c.paused.Store(true)
 }
 
-// Resume undoes Pause: fetching restarts on the assigned partitions and
-// blocked partitions whose wait has elapsed resume.
+// Resume undoes Pause: fetching restarts on the assigned partitions. A
+// partition that is blocked on an unparkable message and still waiting out its
+// backoff stays paused and resumes on its own when the wait elapses; a blocked
+// partition whose wait already elapsed while the consumer was paused resumes on
+// the next poll pass.
 func (c *Consumer) Resume() {
 	c.paused.Store(false)
 }
@@ -778,10 +790,11 @@ func ignoreNoOffset(err error) error {
 // arguments it commits every offset stored so far, which are the offsets of
 // messages already parked, and returns nil when there is nothing to commit.
 //
-// With ConsumerWithAutoCommit(false) the handler must call Commit itself,
-// otherwise nothing is committed. With auto commit on it is optional, for
-// committing sooner than the auto commit interval. It returns ErrConsumerClosed
-// once the consumer has been closed.
+// With ConsumerWithAutoCommit(false) the handler (or application) is
+// responsible for committing and must call Commit itself; the library still
+// commits stored offsets when partitions are revoked in a rebalance. With auto
+// commit on it is optional, for committing sooner than the auto commit
+// interval. It returns ErrConsumerClosed once the consumer has been closed.
 func (c *Consumer) Commit(msgs ...*Message) error {
 	if c.handleClosed.Load() {
 		return ErrConsumerClosed

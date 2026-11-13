@@ -105,7 +105,9 @@ func (p *Producer) Produce(ctx context.Context, topic string, msg *Message) erro
 // arrived. It returns nil for an empty batch. Failures are collected rather than
 // stopping at the first one: the result is the errors.Join of every message
 // that failed (use errors.Is / errors.As on it), or nil when all were
-// acknowledged. Messages that did not fail may still have been delivered.
+// acknowledged. When an error is returned, the messages it does not name were
+// delivered. When ctx ends first, the messages that have no delivery report yet
+// may still be delivered later.
 // Back-pressure, ctx handling and the ErrProducerClosed rule are the same as
 // for Produce, and it must not be called concurrently with Close.
 func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {

@@ -160,9 +160,12 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 // Details holds "groupId", "state" (the group state), "memberCount", "lag" (the
 // total), "maxLag" and "partitions", a list of maps with "topic", "partition",
 // "committed", "high" and "lag" for every partition with a committed offset.
-// DOWN results from a failed query carry only "groupId" (plus "topic" and
-// "partition" for a failed watermark query) and Error; a DOWN caused by lag has
-// an empty Error and the full Details.
+// DOWN results carry Error and, depending on the case, Details: none when the
+// context is already done or the group describe or the committed-offset listing
+// fails; only "groupId" when no group description came back, the group does not
+// exist or reports an error, or the context ends during the watermark queries;
+// "groupId", "topic" and "partition" when a watermark query fails. A DOWN
+// caused by lag has an empty Error and the full Details above.
 func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, maxLag int64) *HealthResult {
 	// Check if context is already cancelled
 	select {

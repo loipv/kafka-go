@@ -82,7 +82,9 @@ type ConsumerConfig struct {
 // producer always uses acks=all. When the produce fails or times out the
 // message is not parked: its partition blocks and the message is retried later
 // (see the consumer's at-least-once behaviour), so a broken DLQ stalls only the
-// affected partitions and nothing is dropped.
+// affected partitions and nothing is dropped. The one exception is
+// RetryConfig.SkipOnMaxRetries: a message dropped that way is parked even when
+// its best-effort DLQ produce fails, so it is lost.
 type DLQConfig struct {
 	// Topic is the dead letter topic. It is required: NewConsumer returns
 	// ErrDLQTopicRequired when a DLQConfig has an empty Topic.
@@ -225,10 +227,10 @@ func ConsumerWithHeartbeatInterval(interval time.Duration) ConsumerOption {
 // ConsumerWithRebalanceTimeout sets max.poll.interval.ms: the longest the
 // consumer may go without polling before the group considers it failed. The
 // default is zero, meaning the library computes the value itself. Whatever is
-// set, the effective value is the largest of the option, 300s, and 1.5 times
-// the handler retry budget (the sum of the retry waits of ConsumerWithRetry)
-// plus the DLQ delivery timeout, so a low value can never make the consumer
-// less tolerant than the default.
+// set, the effective value is the largest of the option, the 300s floor, and 1.5
+// times the sum of the handler retry budget (the sum of the retry waits of
+// ConsumerWithRetry) and the DLQ delivery timeout, so a low value can never
+// make the consumer less tolerant than the default.
 func ConsumerWithRebalanceTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.RebalanceTimeout = timeout
@@ -291,7 +293,9 @@ func ConsumerWithIdempotencyTTL(ttl time.Duration) ConsumerOption {
 // ConsumerWithDLQ enables a dead letter queue for messages that cannot be
 // processed. The default is nil: no DLQ, so a message that fails (after
 // retries) and is not claimed by the error handler blocks its partition
-// instead. See DLQConfig for the delivery guarantees.
+// instead (unless RetryConfig.SkipOnMaxRetries drops it). With a DLQ, a message
+// whose DLQ produce fails also blocks its partition, with the same
+// SkipOnMaxRetries exception. See DLQConfig for the delivery guarantees.
 func ConsumerWithDLQ(dlq *DLQConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.DLQ = dlq
@@ -300,8 +304,11 @@ func ConsumerWithDLQ(dlq *DLQConfig) ConsumerOption {
 
 // ConsumerWithAutoCommit sets whether librdkafka commits offsets in the
 // background (enable.auto.commit). The default is true, committing every
-// ConsumerWithAutoCommitInterval. Only offsets of parked messages (processed,
-// confirmed to the DLQ, or claimed by the error handler) are ever committed.
+// ConsumerWithAutoCommitInterval. The library itself only stores and commits
+// offsets of parked messages: handled successfully, confirmed in the DLQ,
+// claimed by the error handler, skipped as an idempotency duplicate, or dropped
+// under RetryConfig.SkipOnMaxRetries. An explicit Consumer.Commit(msgs...)
+// commits exactly the messages the caller passes.
 //
 // With false nothing is committed in the background: the handler (or the
 // application) must call Consumer.Commit itself. Offsets are still stored when
@@ -365,8 +372,10 @@ func ConsumerWithErrorHandler(handler ErrorHandler) ConsumerOption {
 
 // ConsumerWithRebalanceCallback sets a callback invoked when partitions are
 // assigned or revoked during a rebalance. The default is nil: the library still
-// handles assignment itself. The callback runs on the goroutine running Start,
-// before the library applies the assignment, so keep it short. Use it for:
+// handles assignment itself. The callback runs on whichever goroutine is
+// polling the client (normally the one running Start, and the one calling
+// Close while the client shuts down), before the library applies the
+// assignment, so keep it short. Use it for:
 //   - manual offset commits before partition revocation
 //   - resource cleanup when losing partitions
 //   - initializing resources when gaining new partitions
@@ -382,9 +391,12 @@ func ConsumerWithRebalanceCallback(callback RebalanceCallback) ConsumerOption {
 }
 
 // ConsumerWithTracing sets the OpenTelemetry tracing configuration. The default
-// is nil (tracing off); a non-nil config also needs Enabled set. Each handler
-// invocation runs inside a consumer span, parented to the trace context found
-// in the message headers.
+// is nil (tracing off); a non-nil config also needs Enabled set. With a
+// single-message handler, one consumer span covers the whole handling of a
+// message, retries included, and is parented to the trace context found in the
+// message headers. With a batch handler there is one span per batch, parented
+// to the first message's trace context, with the other messages' trace contexts
+// attached as links.
 func ConsumerWithTracing(tracing *TracingConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.Tracing = tracing

@@ -194,8 +194,9 @@ type TopicPartition struct {
 }
 
 // RebalanceCallback is called when partitions are assigned or revoked; set it
-// with ConsumerWithRebalanceCallback. It runs on the goroutine running
-// Consumer.Start. A non-nil return is logged and makes the library skip its own
+// with ConsumerWithRebalanceCallback. It runs on whichever goroutine is polling
+// the client: normally the one running Consumer.Start, and the one calling
+// Consumer.Close while the client shuts down. A non-nil return is logged and makes the library skip its own
 // handling of that event (use with caution).
 type RebalanceCallback func(event RebalanceEvent) error
 
@@ -203,9 +204,11 @@ type RebalanceCallback func(event RebalanceEvent) error
 // returned by Consumer.Metrics. The counters only grow, over the life of the
 // Consumer; BlockedPartitions is the state at the time of the snapshot.
 type Metrics struct {
-	// HandlerFailures counts every failed invocation of a message handler,
-	// including the first attempt, not only the retries after it. A failed batch
-	// handler call is not counted.
+	// HandlerFailures counts failed handler invocations per message. With a
+	// single-message handler every failed attempt counts, including the first,
+	// not only the retries after it. With a batch handler a failed batch counts
+	// once for each message handed to the handler. It equals the sum of the
+	// per-topic values in ByTopic.
 	HandlerFailures int64 `json:"handlerFailures"`
 	// SentToDLQ counts messages whose DLQ produce was confirmed.
 	SentToDLQ int64 `json:"sentToDlq"`
@@ -223,8 +226,9 @@ type Metrics struct {
 // topic name to it. The counters are keyed by the topic the message was
 // consumed from.
 type TopicMetrics struct {
-	// HandlerFailures counts every failed handler invocation, including the
-	// first attempt, for messages from this topic.
+	// HandlerFailures counts failed handler invocations for messages from this
+	// topic: with a single-message handler every failed attempt, including the
+	// first; with a batch handler one per message of a failed batch.
 	HandlerFailures int64 `json:"handlerFailures"`
 	// SentToDLQ counts messages from this topic whose DLQ produce was confirmed.
 	SentToDLQ int64 `json:"sentToDlq"`
