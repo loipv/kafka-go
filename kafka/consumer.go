@@ -727,12 +727,9 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 
 			// Commit any pending offsets before unassigning (if auto-commit is disabled)
 			if !c.config.AutoCommit {
-				if _, err := consumer.Commit(); err != nil {
-					// Ignore "no offset stored" errors
-					var ke ckafka.Error
-					if !errors.As(err, &ke) || ke.Code() != ckafka.ErrNoOffset {
-						c.logger.Warn("failed to commit offsets during rebalance", "error", err)
-					}
+				// "no offset stored" is not a failure
+				if _, err := consumer.Commit(); ignoreNoOffset(err) != nil {
+					c.logger.Warn("failed to commit offsets during rebalance", "error", err)
 				}
 			}
 
@@ -757,17 +754,28 @@ const (
 	outcomeBlocked                // unparkable — partition must block and retry
 )
 
+// ignoreNoOffset maps librdkafka's "no offset stored" (nothing to commit) to nil
+// and returns every other error unchanged.
+func ignoreNoOffset(err error) error {
+	var ke ckafka.Error
+	if errors.As(err, &ke) && ke.Code() == ckafka.ErrNoOffset {
+		return nil
+	}
+	return err
+}
+
 // Commit stores and commits offsets for the given messages. With no
-// arguments it commits everything stored so far — offsets are stored only
-// when messages are parked, not on consumption. Offsets are committed at
-// max(msg.Offset)+1 per (topic, partition).
+// arguments it commits everything stored so far (nil when there is nothing to
+// commit) — offsets are stored only when messages are parked, not on
+// consumption. Offsets are committed at max(msg.Offset)+1 per (topic,
+// partition).
 func (c *Consumer) Commit(msgs ...*Message) error {
 	if atomic.LoadInt32(&c.handleClosed) == 1 {
 		return ErrConsumerClosed
 	}
 	if len(msgs) == 0 {
 		_, err := c.consumer.Commit()
-		return err
+		return ignoreNoOffset(err)
 	}
 	if _, err := c.consumer.StoreOffsets(commitOffsets(msgs)); err != nil {
 		return fmt.Errorf("store offsets: %w", err)

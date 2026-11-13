@@ -756,3 +756,31 @@ func TestIsFatalClientError(t *testing.T) {
 		})
 	}
 }
+
+func TestIgnoreNoOffset(t *testing.T) {
+	noOffset := ckafka.NewError(ckafka.ErrNoOffset, "no offset", false)
+	transport := ckafka.NewError(ckafka.ErrTransport, "x", false)
+	plain := errors.New("plain")
+	tests := []struct {
+		name    string
+		err     error
+		wantNil bool
+	}{
+		{"nil", nil, true},
+		{"no offset", noOffset, true},
+		{"wrapped no offset", fmt.Errorf("wrap: %w", noOffset), true},
+		{"transport", transport, false},
+		{"plain", plain, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ignoreNoOffset(tt.err)
+			if tt.wantNil && got != nil {
+				t.Errorf("ignoreNoOffset(%v) = %v, want nil", tt.err, got)
+			}
+			if !tt.wantNil && !errors.Is(got, tt.err) {
+				t.Errorf("ignoreNoOffset(%v) = %v, want the error unchanged", tt.err, got)
+			}
+		})
+	}
+}
