@@ -46,7 +46,7 @@ All library code lives in `kafka/`. There are **no interfaces for the producer/c
 - `doc.go` - package doc and `Version`.
 - `types.go` - `Message`, `Headers`, `GroupedBatch`, `TopicPartition`, `Metrics`/`TopicMetrics`, handler function types, `RebalanceEvent`/`RebalanceType`, enums (`Acks`, `Compression`, `PartitionAssignor`, `HealthStatus`).
 - `errors.go` - sentinel errors; tests assert on them.
-- `config.go` - `connConfig` with `configMap()` (every internal client builds its librdkafka config through it, so SSL/SASL is inherited everywhere), `buildProducerConfig`/`buildConsumerConfig` (derives `max.poll.interval.ms`), `SASLConfig` (password redacted when printed or logged), `TracingConfig`, `warnPlaintextSASL`.
+- `config.go` - `connConfig` with `configMap()` (every internal client builds its librdkafka config through it, so SSL/SASL is inherited everywhere), `buildProducerConfig`/`buildConsumerConfig` (derives `max.poll.interval.ms`), `SASLConfig` (password redacted when printed, logged or JSON-encoded), `TracingConfig`, `warnPlaintextSASL`.
 - `producer.go` - `Producer`: `Produce`, `ProduceBatch` (synchronous, back-pressure when the client queue is full, `errors.Join` of failures), `ProduceAsync` (failures go to `ProducerWithDeliveryErrorHandler`, else logged), `Flush`, `Close`.
 - `producer_options.go` - `ProducerConfig` and `ProducerWith*` options.
 - `consumer.go` - `Consumer`: `OnMessage`/`OnBatch`/`OnGroupedBatch`, `Start`, `Close`, `Commit`, `Pause`/`Resume`, `Metrics`, the poll loop, batch assembly, rebalance callback.

@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -296,11 +297,42 @@ func TestSASLConfig_RedactsPassword(t *testing.T) {
 	s := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: "s3cret"}
 	var buf bytes.Buffer
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("cfg", "sasl", s)
+
+	// encoding/json, directly and nested: slog's JSON handler marshals a
+	// struct attribute with encoding/json, which bypasses LogValue.
+	jsonOf := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal(%T): %v", v, err)
+		}
+		return string(b)
+	}
+	var jsonBuf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&jsonBuf, nil)).Info("cfg", "dlq", &DLQConfig{Topic: "d", SASL: s})
+	type userConfig struct {
+		Name string
+		Auth *SASLConfig
+	}
+
 	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%v", *s),
-		fmt.Sprintf("%#v", s), fmt.Sprintf("%#v", *s), buf.String()} {
+		fmt.Sprintf("%#v", s), fmt.Sprintf("%#v", *s), buf.String(),
+		jsonOf(*s), jsonOf(s), jsonBuf.String(), jsonOf(userConfig{Name: "app", Auth: s})} {
 		if strings.Contains(out, "s3cret") || !strings.Contains(out, "[REDACTED]") {
 			t.Errorf("password leaked or not redacted in %q", out)
 		}
+	}
+	if out := jsonOf(s); !strings.Contains(out, `"Mechanism":"PLAIN"`) || !strings.Contains(out, `"Username":"u"`) {
+		t.Errorf("json = %s, want mechanism and username kept", out)
+	}
+
+	// Decoding keeps the default behaviour: a JSON password is read in.
+	var decoded SASLConfig
+	if err := json.Unmarshal([]byte(`{"Mechanism":"PLAIN","Username":"u","Password":"p"}`), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if decoded != (SASLConfig{Mechanism: "PLAIN", Username: "u", Password: "p"}) {
+		t.Errorf("decoded = {%s %s passwordFilled=%v}, want {PLAIN u passwordFilled=true}",
+			decoded.Mechanism, decoded.Username, decoded.Password == "p")
 	}
 }
 

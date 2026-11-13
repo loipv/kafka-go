@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -200,8 +201,15 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 
 // SASLConfig holds SASL authentication credentials. Pass it to
 // ProducerWithSASL or ConsumerWithSASL (or the DLQConfig.SASL field). The
-// password is redacted by String, GoString and LogValue, so printing or logging
-// a SASLConfig, or a config holding one, does not leak it.
+// password is replaced by "[REDACTED]" in every output the type controls: the
+// %v, %+v and %#v verbs (String, GoString), slog's text and JSON handlers
+// (LogValue, MarshalJSON) and encoding/json (MarshalJSON), also when the
+// SASLConfig or a pointer to it is nested in another struct such as DLQConfig.
+// (fmt cannot call methods on unexported fields, so a SASLConfig value held in
+// an unexported field of your own struct is printed field by field; hold a
+// pointer there instead.) Because JSON output is redacted, a config cannot be
+// round-tripped through JSON with its password; decoding JSON into a
+// SASLConfig still reads the password.
 //
 // SASL without SSL sends the credentials unencrypted (security.protocol
 // sasl_plaintext); NewProducer, NewConsumer and NewHealthChecker log a warning
@@ -213,7 +221,7 @@ type SASLConfig struct {
 	// Username is the SASL user name (sasl.username).
 	Username string
 	// Password is the SASL password (sasl.password). It is redacted when the
-	// SASLConfig is printed or logged.
+	// SASLConfig is printed, logged or encoded as JSON.
 	Password string
 }
 
@@ -226,6 +234,14 @@ func (s SASLConfig) String() string {
 
 // GoString redacts the password for the %#v verb, which bypasses String.
 func (s SASLConfig) GoString() string { return s.String() }
+
+// MarshalJSON encodes the config with the password redacted, so JSON logging
+// (slog.NewJSONHandler marshals struct attributes with encoding/json, bypassing
+// LogValue) and any other JSON output never leak it. The keys are the field
+// names, as with the default encoding.
+func (s SASLConfig) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct{ Mechanism, Username, Password string }{s.Mechanism, s.Username, "[REDACTED]"})
+}
 
 // LogValue implements slog.LogValuer with the password redacted.
 func (s SASLConfig) LogValue() slog.Value {

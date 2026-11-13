@@ -145,8 +145,11 @@ related). Delivery stays at-least-once.
   never includes the username or password. The same applies to a DLQ cluster
   configured through `DLQConfig`.
 - The SASL password is redacted by `SASLConfig` when printed with `%v`, `%+v` or
-  `%#v` and when logged through `slog` (new `String`, `GoString` and `LogValue`
-  methods), including inside a config that holds one.
+  `%#v`, when logged through `slog`'s text or JSON handler, and in
+  `encoding/json` output (new `String`, `GoString`, `LogValue` and `MarshalJSON`
+  methods), also when the `SASLConfig` or a pointer to it is nested in another
+  struct such as `DLQConfig`. JSON output is redacted, so a config cannot be
+  round-tripped through JSON with its password; decoding still reads it.
 - Idempotency keys are no longer written to the debug log; the duplicate-skip
   line now logs topic, partition and offset.
 - CI runs with least-privilege permissions (`contents: read`) and a `govulncheck`

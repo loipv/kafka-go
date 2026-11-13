@@ -599,7 +599,7 @@ defer producer.Close()
 ```
 
 - Use SASL together with SSL. Without SSL the credentials travel unencrypted (`sasl_plaintext`), and `NewProducer`, `NewConsumer` and `NewHealthChecker` log a warning. The warning never contains the username or password.
-- `SASLConfig` redacts the password in `String`, `GoString` and `LogValue`, so printing or logging a `SASLConfig`, or a config that holds one, does not leak it.
+- `SASLConfig` replaces the password with `[REDACTED]` for `%v`, `%+v` and `%#v`, in `slog`'s text and JSON handlers, and in `encoding/json` output, also when the `SASLConfig` (or a pointer to it) is nested in another struct such as `DLQConfig`. A config therefore cannot be round-tripped through JSON with its password; decoding JSON still reads it. `fmt` cannot call methods on unexported fields, so hold a `*SASLConfig`, not a value, in an unexported field of your own struct.
 
 ### What the library logs
 
