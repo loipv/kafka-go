@@ -44,6 +44,8 @@ related). Delivery stays at-least-once.
   context deadline) and `NewHealthCheckerFromProducer` (use `NewHealthChecker`).
 - `PartitionAny`: the producer always partitions by key and ignores
   `Message.Partition`.
+- `ErrDLQClosed`: it could never reach a caller (the consumer only logs it), so
+  it is unexported.
 - Exported internals, which are now unexported:
   - types `DLQService`, `DLQMetricsCollector` (with `NewDLQMetricsCollector` and
     its methods), `IdempotencyStore` (with `NewIdempotencyStore`, `Add`,

@@ -121,10 +121,10 @@ func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *c
 // keyed by source topic. It returns the errors.Join of every failure and nil
 // only when all messages were confirmed; the caller decides what a failure
 // means (the partition blocks). Closing the service ends the wait with an
-// error wrapping ErrDLQClosed: no report can arrive once the producer is gone.
+// error wrapping errDLQClosed: no report can arrive once the producer is gone.
 func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause error, attempts int) error {
 	if s.closed.Load() {
-		return ErrDLQClosed
+		return errDLQClosed
 	}
 	deliveryChan := make(chan ckafka.Event, len(msgs))
 	var errs []error
@@ -152,7 +152,7 @@ func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause erro
 			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", ctx.Err()))
 			return errors.Join(errs...)
 		case <-s.done:
-			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", ErrDLQClosed))
+			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", errDLQClosed))
 			return errors.Join(errs...)
 		}
 	}

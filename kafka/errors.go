@@ -10,10 +10,6 @@ var (
 	// ErrConsumerClosed is returned by Consumer.Start after Close, and by
 	// Consumer.Commit once the consumer has been closed.
 	ErrConsumerClosed = errors.New("consumer is closed")
-	// ErrDLQClosed is the error of a DLQ produce attempted after the consumer's
-	// DLQ producer was closed (by Close). The consumer logs it and does not park
-	// the message; it is not returned from Start.
-	ErrDLQClosed = errors.New("dlq service is closed")
 	// ErrBrokersRequired is returned by NewProducer, NewConsumer and
 	// NewHealthChecker when no broker address is configured.
 	ErrBrokersRequired = errors.New("brokers are required")
@@ -40,3 +36,8 @@ var (
 	// ErrInvalidBatchTimeout is returned by NewConsumer when the batch timeout is not positive.
 	ErrInvalidBatchTimeout = errors.New("batch timeout must be greater than zero")
 )
+
+// errDLQClosed is the error of a DLQ produce attempted, or still waiting, when
+// the consumer's DLQ producer is closed (by Close). The consumer logs it and
+// does not park the message; it never reaches the user, so it is unexported.
+var errDLQClosed = errors.New("dlq service is closed")

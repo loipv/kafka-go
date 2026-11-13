@@ -526,7 +526,7 @@ func TestDLQ_ProduceAllReturnsWhenServiceCloses(t *testing.T) {
 	}
 	select {
 	case err := <-errc:
-		if !errors.Is(err, ErrDLQClosed) {
+		if !errors.Is(err, errDLQClosed) {
 			t.Errorf("produceAll() = %v, want an error wrapping the DLQ-closed sentinel", err)
 		}
 	case <-time.After(5 * time.Second):

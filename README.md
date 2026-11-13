@@ -722,7 +722,6 @@ Sentinel errors are package variables; test for them with `errors.Is`.
 | `ErrConsumerRunning` | By `Consumer.Start` when the consumer is already running. |
 | `ErrConsumerClosed` | By `Consumer.Start` after `Close`, and by `Consumer.Commit` once the consumer has been closed. |
 | `ErrProducerClosed` | By `Produce`, `ProduceBatch` and `ProduceAsync` after the producer was closed. |
-| `ErrDLQClosed` | The error of a DLQ produce attempted after `Close` closed the DLQ producer. The consumer logs it and does not park the message; `Start` does not return it. |
 | `ErrSkippedOnMaxRetries` | Wraps the last handler error passed to the error handler and the DLQ when `SkipOnMaxRetries` drops a message. `Start` does not return it. |
 
 `NewProducer` and `NewConsumer` also return an error when librdkafka rejects the resulting configuration (for example an unsupported compression codec). `NewConsumer` itself rejects a session timeout that is not below the computed `max.poll.interval.ms`.
