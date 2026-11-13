@@ -20,7 +20,9 @@ import (
 // message was confirmed on the DLQ, the error handler claimed it, it was
 // skipped as an idempotency duplicate, or SkipOnMaxRetries dropped it. A message
 // that cannot be parked blocks its partition (paused, retried with an
-// escalating wait) instead of being skipped.
+// escalating wait) instead of being skipped. The one exception is shutdown: a
+// message it interrupts is neither parked nor blocked, only redelivered (see
+// Start).
 //
 // Handlers (message, batch, grouped batch, error handler) run on the goroutine
 // running Start, with one exception: the final batch flush performed by Close
@@ -179,7 +181,8 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 // replaces the earlier one. Register before Start; Start returns ErrNoHandler
 // otherwise. When the handler returns an error it is retried as described on
 // RetryConfig, then offered to the error handler and the DLQ, and finally
-// blocks its partition.
+// blocks its partition; an error that shutdown caused takes none of these
+// steps (see Start).
 func (c *Consumer) OnMessage(handler MessageHandler) {
 	c.messageHandler, c.batchHandler, c.groupedBatchHandler = handler, nil, nil
 }
@@ -228,10 +231,13 @@ func isFatalClientError(err error) bool {
 // error: Start does not release the client or flush the last partial batch.
 //
 // Cancelling ctx is a graceful shutdown, not a handler failure: a message or
-// batch whose handler (or retry wait) is in flight when ctx ends is neither
-// parked nor blocked. Its offset is not stored, the error handler and the DLQ
-// are not invoked, and it is redelivered when the group next consumes the
-// partition. Handlers should honour ctx so shutdown is prompt.
+// batch whose handler returns an error after ctx ended, or whose retry wait
+// the end of ctx cuts short, is neither parked nor blocked. Its offset is not
+// stored, the error handler and the DLQ are not invoked, and it is
+// redelivered: to this Consumer if Start is called again, otherwise to
+// whichever member next consumes the partition. A handler that returns nil
+// after ctx ended has processed its message, which is parked as usual.
+// Handlers should honour ctx so shutdown is prompt.
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler

@@ -130,15 +130,19 @@ type HealthResult struct {
 
 // MessageHandler handles a single message; register it with Consumer.OnMessage.
 // Returning nil parks the message (its offset may be stored); returning an
-// error starts the retry, error handler and DLQ flow. The context is derived
-// from the one passed to Consumer.Start.
+// error starts the retry, error handler and DLQ flow, unless the context has
+// ended: that is shutdown, and the message is only redelivered (see
+// Consumer.Start). The context is derived from the one passed to
+// Consumer.Start.
 type MessageHandler func(ctx context.Context, msg *Message) error
 
 // BatchHandler handles a batch of messages; register it with Consumer.OnBatch.
 // The messages are in consumption order and may come from several partitions.
 // Returning nil parks the whole batch; returning an error fails the whole
-// batch. If an idempotency key is configured, duplicates are removed before the
-// call, so the slice can be shorter than the number of messages consumed.
+// batch, unless the context has ended: that is shutdown, and the batch is only
+// redelivered (see Consumer.Start). If an idempotency key is configured,
+// duplicates are removed before the call, so the slice can be shorter than the
+// number of messages consumed.
 type BatchHandler func(ctx context.Context, msgs []*Message) error
 
 // GroupedBatchHandler handles key-grouped batches; register it with

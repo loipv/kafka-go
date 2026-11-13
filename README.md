@@ -272,7 +272,7 @@ consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) e
 
 If `Close` is called while a long retry is still in flight and the `Start` context was not cancelled, `Close` falls back to its 5-second wait and may close the client under that retry. `Close` is safe to call more than once; later calls return `nil`.
 
-Shutdown is not a handler failure. A message or batch whose handler, or retry wait, is in flight when the `Start` context is cancelled (or whose retry wait `Close` interrupts) is neither parked nor blocked: its offset is not stored, the error handler and the DLQ are not invoked, and it is redelivered when the group next consumes the partition. The same holds for the final batch flush in `Close` when its `ctx` ends and the batch handler then fails. Let handlers honour their `ctx` so shutdown is prompt.
+Shutdown is not a handler failure. A message or batch whose handler returns an error after the `Start` context was cancelled, or whose retry wait that cancellation or `Close` cuts short, is neither parked nor blocked: its offset is not stored, the error handler and the DLQ are not invoked, and it is redelivered, to this consumer if `Start` is called again and otherwise to whichever member next consumes the partition. A handler that returns `nil` after the cancellation has processed its message, which is parked as usual. The same holds for the final batch flush in `Close` when its `ctx` ends and the batch handler then fails. Let handlers honour their `ctx` so shutdown is prompt.
 
 ### Pause and Resume
 
@@ -484,7 +484,7 @@ This is a best-effort filter, not exactly-once processing. Its limits:
 
 - The memory is in-process only. It is lost on restart and when a partition moves to another instance.
 - It holds one entry per distinct key seen within one TTL, so memory grows with key volume times TTL.
-- A key is recorded only after the handler succeeded. In batch modes duplicates are removed before the handler is called (including repeats inside the same batch), but the keys of a failed batch are not recorded. If that batch is redelivered, only messages whose keys earlier successful handling recorded are filtered; with a DLQ or an error handler that claims the messages, the batch is not redelivered at all.
+- A key is recorded only after the handler succeeded. In batch modes duplicates are removed before the handler is called (including repeats inside the same batch), but the keys of a failed batch are not recorded. If that batch is redelivered, only messages whose keys earlier successful handling recorded are filtered; when an error handler claims the messages or their DLQ produce is confirmed, the batch is not redelivered at all.
 
 Real duplicate protection belongs in the handler, for example a unique key in the database that makes a repeated write a no-op.
 

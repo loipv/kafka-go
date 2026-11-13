@@ -148,8 +148,10 @@ related). Delivery stays at-least-once.
   by returning `nil`, parked a message that was never processed (in batch mode
   the whole batch), so its offset was committed and the message lost; with a
   DLQ, healthy messages were written to the DLQ and also redelivered. Such a
-  message or batch is now left unstored and redelivered, and the error handler
-  and the DLQ are not invoked.
+  message or batch is now left unstored and redelivered (also when `Start` is
+  called again on the same consumer), the error handler and the DLQ are not
+  invoked, and a handler error returned after the context ended is not counted
+  in `HandlerFailures`.
 - `Producer.Flush` after `Close` crashed the process (a segmentation fault in
   librdkafka); it now returns `ErrProducerClosed`.
 - `HealthChecker.CheckTopic` asked the broker to auto-create the topic it

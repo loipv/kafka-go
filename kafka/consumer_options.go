@@ -276,9 +276,9 @@ func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 // the handler succeeded; the keys of a failed batch are not recorded. If that
 // batch is redelivered, messages whose keys were recorded by earlier successful
 // handling are still filtered, but the rest come back, so real duplicate
-// protection for failed batches belongs in the handler. (With a DLQ, or an
-// error handler that claims the messages, a failed batch is not redelivered at
-// all.) Treat it as best-effort de-duplication, not exactly-once.
+// protection for failed batches belongs in the handler. (When an error handler
+// claims the messages or their DLQ produce is confirmed, a failed batch is not
+// redelivered at all.) Treat it as best-effort de-duplication, not exactly-once.
 func ConsumerWithIdempotencyKey(fn IdempotencyKeyFunc) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.IdempotencyKey = fn
