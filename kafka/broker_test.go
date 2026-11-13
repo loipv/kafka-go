@@ -458,7 +458,6 @@ func TestDLQRoundTrip(t *testing.T) {
 		ConsumerWithGroupID(group), ConsumerWithTopics(source),
 		ConsumerWithDLQ(&DLQConfig{
 			Topic: dlqTopic, IncludeErrorInfo: true,
-			MaxRetries: 1, RetryDelay: 10 * time.Millisecond, RetryBackoffMultiplier: 1,
 		}),
 	)...)
 	if err != nil {
@@ -550,7 +549,6 @@ func TestDLQSeparateCluster(t *testing.T) {
 		ConsumerWithGroupID(group), ConsumerWithTopics(source),
 		ConsumerWithDLQ(&DLQConfig{
 			Topic: dlqTopic, Brokers: []string{dst.BootstrapServers()},
-			MaxRetries: 1, RetryDelay: 10 * time.Millisecond, RetryBackoffMultiplier: 1,
 		}),
 	)...)
 	if err != nil {
@@ -618,8 +616,7 @@ func TestDLQBrokerDown_BlocksInsteadOfDropping(t *testing.T) {
 	c, err := NewConsumer(append(fastAtLeastOnce(),
 		ConsumerWithBrokers(mc.BootstrapServers()),
 		ConsumerWithGroupID(group), ConsumerWithTopics(source),
-		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic, MaxRetries: 0,
-			RetryDelay: time.Millisecond, RetryBackoffMultiplier: 1}),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic}),
 		ConsumerWithRawConfig(map[string]any{"message.timeout.ms": 5000}),
 	)...)
 	if err != nil {

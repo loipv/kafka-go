@@ -39,11 +39,8 @@ func main() {
 
 		// DLQ configuration
 		kafka.ConsumerWithDLQ(&kafka.DLQConfig{
-			Topic:                  "orders-dlq",
-			MaxRetries:             3,
-			RetryDelay:             1 * time.Second,
-			RetryBackoffMultiplier: 2.0,
-			IncludeErrorInfo:       true,
+			Topic:            "orders-dlq",
+			IncludeErrorInfo: true,
 		}),
 
 		// Idempotency

@@ -76,9 +76,6 @@ const (
 	DefaultBatchTimeout         = 5 * time.Second
 	DefaultIdempotencyTTL       = 1 * time.Hour
 	DefaultAutoCommitInterval   = 5 * time.Second
-	DefaultDLQMaxRetries        = 3
-	DefaultDLQRetryDelay        = 1 * time.Second
-	DefaultDLQBackoffMultiplier = 2.0
 	DefaultRetryMaxRetries      = 3
 	DefaultRetryInitialInterval = 1 * time.Second
 	DefaultRetryMultiplier      = 2.0

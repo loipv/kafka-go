@@ -63,11 +63,8 @@ type ConsumerConfig struct {
 
 // DLQConfig holds Dead Letter Queue configuration
 type DLQConfig struct {
-	Topic                  string
-	MaxRetries             int
-	RetryDelay             time.Duration
-	RetryBackoffMultiplier float64
-	IncludeErrorInfo       bool
+	Topic            string
+	IncludeErrorInfo bool
 
 	// Separate DLQ cluster. Empty Brokers inherits the consumer's connection
 	// (brokers, SSL, SASL, Raw). Set Brokers and the DLQ producer uses only the

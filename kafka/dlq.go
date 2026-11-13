@@ -18,7 +18,6 @@ type DLQService struct {
 	config   *DLQConfig
 	metrics  *DLQMetricsCollector
 	closed   int32 // atomic: 0=open, 1=closed
-	after    func(time.Duration) <-chan time.Time
 }
 
 // newDLQService creates a new DLQ service. It builds its producer from the
@@ -36,13 +35,13 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 		producer: producer,
 		config:   config,
 		metrics:  metrics,
-		after:    time.After,
 	}, nil
 }
 
 // produceToDLQ sends a failed message to the DLQ topic. The caller's Message
-// is never mutated — DLQ headers go on a shallow copy. The produce is
-// confirmed by a delivery report and retried per DLQConfig before giving up.
+// is never mutated — DLQ headers go on a shallow copy. The produce is a
+// single attempt confirmed by a delivery report; the caller decides what a
+// failure means (the partition blocks).
 func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return ErrDLQClosed
@@ -57,30 +56,7 @@ func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, 
 		out.SetHeader("x-dlq-error-message", []byte(err.Error()))
 	}
 
-	return s.produceWithRetry(ctx, s.config.Topic, &out)
-}
-
-// produceWithRetry retries the DLQ produce per DLQConfig.MaxRetries /
-// RetryDelay / RetryBackoffMultiplier — a failed produce used to drop the
-// message after one attempt (#10-adjacent gap).
-func (s *DLQService) produceWithRetry(ctx context.Context, topic string, msg *Message) error {
-	maxRetries, delay := s.config.MaxRetries, s.config.RetryDelay
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		lastErr = s.produceToTopic(ctx, topic, msg)
-		if lastErr == nil {
-			return nil
-		}
-		if attempt >= maxRetries {
-			return fmt.Errorf("dlq produce failed after %d attempts: %w", attempt+1, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-s.after(delay):
-			delay = time.Duration(float64(delay) * s.config.RetryBackoffMultiplier)
-		}
-	}
+	return s.produceToTopic(ctx, s.config.Topic, &out)
 }
 
 // produceToTopic sends a message to a specific topic

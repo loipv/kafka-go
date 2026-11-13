@@ -11,7 +11,7 @@
 //   - Intelligent batch processing with configurable size and timeout
 //   - Key-based grouping within batches for ordered processing
 //   - In-memory idempotency with TTL
-//   - Dead Letter Queue (DLQ) with automatic retry and exponential backoff
+//   - Dead Letter Queue (DLQ); a failed DLQ produce blocks the partition
 //   - OpenTelemetry distributed tracing
 //   - Built-in health checks
 //   - Graceful shutdown support

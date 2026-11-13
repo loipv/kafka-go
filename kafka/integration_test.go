@@ -214,8 +214,7 @@ func TestIntegrationSASL_ProduceConsumeDLQHealth(t *testing.T) {
 	failer, err := NewConsumer(fastIntegration(
 		ConsumerWithBrokers(seed), ConsumerWithSASL(saslConfig()),
 		ConsumerWithGroupID(dlqGroup), ConsumerWithTopics(srcTopic),
-		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic, IncludeErrorInfo: true,
-			MaxRetries: 1, RetryDelay: 10 * time.Millisecond, RetryBackoffMultiplier: 1}),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic, IncludeErrorInfo: true}),
 	)...)
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
