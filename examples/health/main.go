@@ -42,7 +42,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		result := healthChecker.CheckBrokers(ctx)
+		result := healthChecker.Check(ctx)
 
 		w.Header().Set("Content-Type", "application/json")
 		if result.Status != kafka.HealthStatusUp {

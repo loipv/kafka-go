@@ -198,18 +198,6 @@ func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
 	}
 }
 
-// ResetMetrics resets all metrics
-func (m *DLQMetricsCollector) ResetMetrics() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	atomic.StoreInt64(&m.global.HandlerRetries, 0)
-	atomic.StoreInt64(&m.global.MessagesSentToDLQ, 0)
-
-	m.blocked = nil
-	m.byTopic = make(map[string]*DLQTopicMetrics)
-}
-
 // IdempotencyStore stores processed message keys for idempotency
 type IdempotencyStore struct {
 	store     map[string]time.Time
@@ -257,26 +245,12 @@ func (s *IdempotencyStore) IsDuplicate(key string) bool {
 	return false
 }
 
-// Remove removes a key from the store
-func (s *IdempotencyStore) Remove(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.store, key)
-}
-
 // Close closes the idempotency store. Safe to call more than once.
 func (s *IdempotencyStore) Close() {
 	s.closeOnce.Do(func() {
 		close(s.done)
 		s.ticker.Stop()
 	})
-}
-
-// Size returns the number of keys in the store
-func (s *IdempotencyStore) Size() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.store)
 }
 
 // cleanup periodically removes expired entries

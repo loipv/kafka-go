@@ -87,24 +87,6 @@ func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Messa
 	return p.produceAndAwait(ctx, km)
 }
 
-// ProduceMultiTopicBatch sends messages to multiple topics and waits for all reports.
-func (p *Producer) ProduceMultiTopicBatch(ctx context.Context, batches []TopicBatch) error {
-	total := 0
-	for _, b := range batches {
-		total += len(b.Messages)
-	}
-	if total == 0 {
-		return nil
-	}
-	km := make([]*ckafka.Message, 0, total)
-	for _, b := range batches {
-		for _, m := range b.Messages {
-			km = append(km, p.prepareMessage(ctx, b.Topic, m))
-		}
-	}
-	return p.produceAndAwait(ctx, km)
-}
-
 // prepareMessage builds the wire message and stashes the span ender in
 // Opaque — the delivery report hands the same closure back, so correlation
 // is by identity, never by index.

@@ -81,11 +81,6 @@ func (t *TracingService) StartProducerSpan(ctx context.Context, topic string, ms
 		span.SetAttributes(attribute.String(MessagingKafkaMessageKeyKey, string(msg.Key)))
 	}
 
-	// Add partition if specified
-	if msg.Partition != PartitionAny && msg.Partition >= 0 {
-		span.SetAttributes(attribute.Int(MessagingDestinationPartitionID, int(msg.Partition)))
-	}
-
 	return ctx, func(err error) {
 		if err != nil {
 			span.RecordError(err)

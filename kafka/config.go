@@ -83,13 +83,6 @@ func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	if c.RequestTimeout > 0 {
 		cm["request.timeout.ms"] = int(c.RequestTimeout.Milliseconds())
 	}
-	if c.Retry != nil {
-		cm["retries"] = c.Retry.MaxRetries
-		cm["retry.backoff.ms"] = int(c.Retry.InitialInterval.Milliseconds())
-		if c.Retry.MaxInterval > 0 {
-			cm["retry.backoff.max.ms"] = int(c.Retry.MaxInterval.Milliseconds())
-		}
-	}
 	return cm
 }
 

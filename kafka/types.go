@@ -10,9 +10,11 @@ type Headers map[string][]byte
 
 // Message represents a Kafka message
 type Message struct {
-	Key       []byte
-	Value     []byte
-	Headers   Headers
+	Key     []byte
+	Value   []byte
+	Headers Headers
+	// Partition and Offset are only populated on the consume side; they are
+	// ignored when producing.
 	Partition int32
 	Offset    int64
 	Timestamp time.Time
@@ -27,20 +29,11 @@ func (m *Message) SetHeader(key string, value []byte) {
 	m.Headers[key] = value
 }
 
-// TopicBatch represents messages for a specific topic
-type TopicBatch struct {
-	Topic    string
-	Messages []*Message
-}
-
 // GroupedBatch represents messages grouped by key
 type GroupedBatch struct {
 	Key      string
 	Messages []*Message
 }
-
-// PartitionAny represents any partition
-const PartitionAny int32 = -1
 
 // Acks configuration for producer acknowledgment
 type Acks int

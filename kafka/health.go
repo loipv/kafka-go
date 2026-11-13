@@ -13,10 +13,9 @@ import (
 // admin client derived from it) instead of dialing a fresh admin client per
 // check — and that one connection carries SSL/SASL via the connConfig seam.
 type HealthChecker struct {
-	producer     *ckafka.Producer
-	admin        *ckafka.AdminClient
-	timeout      time.Duration
-	ownsProducer bool
+	producer *ckafka.Producer
+	admin    *ckafka.AdminClient
+	timeout  time.Duration
 }
 
 // NewHealthChecker creates a health checker that owns its producer.
@@ -39,34 +38,14 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 		return nil, fmt.Errorf("create health admin client: %w", err)
 	}
 	return &HealthChecker{
-		producer:     p,
-		admin:        admin,
-		timeout:      10 * time.Second,
-		ownsProducer: true,
+		producer: p,
+		admin:    admin,
+		timeout:  10 * time.Second,
 	}, nil
 }
 
-// NewHealthCheckerFromProducer derives a health checker from an existing
-// producer — no extra connections. Close() does NOT close the given producer.
-func NewHealthCheckerFromProducer(p *Producer) (*HealthChecker, error) {
-	admin, err := ckafka.NewAdminClientFromProducer(p.producer)
-	if err != nil {
-		return nil, fmt.Errorf("create health admin client: %w", err)
-	}
-	return &HealthChecker{
-		producer:     p.producer,
-		admin:        admin,
-		timeout:      10 * time.Second,
-		ownsProducer: false,
-	}, nil
-}
-
-// Close releases the health checker's resources. It is a no-op for checkers
-// derived via NewHealthCheckerFromProducer.
+// Close releases the health checker's resources.
 func (h *HealthChecker) Close() error {
-	if !h.ownsProducer {
-		return nil // derived — the producer belongs to the caller
-	}
 	h.admin.Close() // no-op for handles derived from a producer
 	h.producer.Close()
 	return nil
@@ -136,44 +115,6 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 			"brokers":       len(metadata.Brokers),
 			"topics":        len(metadata.Topics),
 			"originatingId": metadata.OriginatingBroker.ID,
-		},
-	}
-}
-
-// CheckBrokers checks broker connectivity
-func (h *HealthChecker) CheckBrokers(ctx context.Context) *HealthResult {
-	// Check if context is already cancelled
-	select {
-	case <-ctx.Done():
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  ctx.Err().Error(),
-		}
-	default:
-	}
-
-	metadata, err := h.admin.GetMetadata(nil, true, int(h.deadlineTimeout(ctx).Milliseconds()))
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err.Error(),
-		}
-	}
-
-	brokerInfos := make([]map[string]any, 0, len(metadata.Brokers))
-	for _, broker := range metadata.Brokers {
-		brokerInfos = append(brokerInfos, map[string]any{
-			"id":   broker.ID,
-			"host": broker.Host,
-			"port": broker.Port,
-		})
-	}
-
-	return &HealthResult{
-		Status: HealthStatusUp,
-		Details: map[string]any{
-			"brokers":     brokerInfos,
-			"brokerCount": len(metadata.Brokers),
 		},
 	}
 }

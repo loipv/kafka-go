@@ -235,16 +235,4 @@ func TestBuildProducerConfig(t *testing.T) {
 			t.Errorf("request.timeout.ms should be omitted when zero, got %v", v)
 		}
 	})
-	t.Run("retry maps to librdkafka retry keys", func(t *testing.T) {
-		cm := buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"},
-			Retry: &RetryConfig{MaxRetries: 8, InitialInterval: 250_000_000, MaxInterval: 30_000_000_000}})
-		for k, w := range map[string]any{
-			"retries": 8, "retry.backoff.ms": 250, "retry.backoff.max.ms": 30000,
-		} {
-			v, err := cm.Get(k, nil)
-			if err != nil || v != w {
-				t.Errorf("key %q = %v (%v), want %v", k, v, err, w)
-			}
-		}
-	})
 }

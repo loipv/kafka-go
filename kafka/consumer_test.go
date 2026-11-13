@@ -169,8 +169,8 @@ func TestPartitionIsolation(t *testing.T) {
 	go c.Start(ctx)
 	defer c.Close(context.Background())
 
-	// Produce with explicit partitions (the library producer always uses
-	// PartitionAny): 2 messages per partition.
+	// Produce with explicit partitions (the library producer always lets the
+	// partitioner choose): 2 messages per partition.
 	raw, err := ckafka.NewProducer(&ckafka.ConfigMap{"bootstrap.servers": mc.BootstrapServers()})
 	if err != nil {
 		t.Fatalf("raw producer: %v", err)

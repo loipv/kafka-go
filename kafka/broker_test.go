@@ -223,58 +223,6 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProduceMultiTopicBatch(t *testing.T) {
-	skipIfShort(t)
-	mc := newMockCluster(t)
-	topicA := uniqueTopic(t, mc, 1)
-	topicB := uniqueTopic(t, mc, 1)
-
-	c, err := NewConsumer(
-		ConsumerWithBrokers(mc.BootstrapServers()),
-		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topicA, topicB),
-		ConsumerWithFromBeginning(true),
-	)
-	if err != nil {
-		t.Fatalf("NewConsumer: %v", err)
-	}
-	got := make(chan *Message, 4)
-	c.OnMessage(func(_ context.Context, m *Message) error { got <- m; return nil })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.Start(ctx)
-	defer c.Close(context.Background())
-
-	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
-	if err != nil {
-		t.Fatalf("NewProducer: %v", err)
-	}
-	defer p.Close()
-	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer pcancel()
-	err = p.ProduceMultiTopicBatch(pctx, []TopicBatch{
-		{Topic: topicA, Messages: []*Message{{Key: []byte("a"), Value: []byte("from-a")}}},
-		{Topic: topicB, Messages: []*Message{{Key: []byte("b"), Value: []byte("from-b")}}},
-	})
-	if err != nil {
-		t.Fatalf("ProduceMultiTopicBatch: %v", err)
-	}
-
-	msgs := recvMessages(t, got, 2, 15*time.Second)
-	byTopic := map[string]*Message{}
-	for _, m := range msgs {
-		byTopic[m.Topic] = m
-	}
-	for topic, want := range map[string]string{topicA: "from-a", topicB: "from-b"} {
-		m, ok := byTopic[topic]
-		if !ok {
-			t.Fatalf("no message consumed from topic %s", topic)
-		}
-		if string(m.Value) != want {
-			t.Errorf("%s value = %q, want %q", topic, m.Value, want)
-		}
-	}
-}
-
 func TestOnGroupedBatchPreservesFirstSeenKeyOrder(t *testing.T) {
 	skipIfShort(t)
 	mc := newMockCluster(t)
@@ -712,7 +660,7 @@ func TestBlockedPartition_NoOffsetDrift(t *testing.T) {
 	go c.Start(ctx)
 	defer c.Close(context.Background())
 
-	// The library producer always uses PartitionAny; explicit partitions need
+	// The library producer always lets the partitioner choose; explicit partitions need
 	// the raw confluent producer.
 	raw, err := ckafka.NewProducer(&ckafka.ConfigMap{"bootstrap.servers": mc.BootstrapServers()})
 	if err != nil {

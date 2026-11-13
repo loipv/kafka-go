@@ -1,4 +1,4 @@
-// Command producer demonstrates single, batch, and multi-topic producing
+// Command producer demonstrates single and batch producing
 // with graceful shutdown.
 package main
 
@@ -115,29 +115,6 @@ func main() {
 		log.Printf("Failed to send batch: %v", err)
 	} else {
 		log.Println("Batch sent successfully!")
-	}
-
-	// Example 3: Produce to multiple topics
-	log.Println("\nSending to multiple topics...")
-	multiTopicBatch := []kafka.TopicBatch{
-		{
-			Topic: "orders",
-			Messages: []*kafka.Message{
-				{Key: []byte("multi-1"), Value: []byte(`{"type":"order"}`)},
-			},
-		},
-		{
-			Topic: "notifications",
-			Messages: []*kafka.Message{
-				{Key: []byte("multi-1"), Value: []byte(`{"type":"notification"}`)},
-			},
-		},
-	}
-
-	if err := producer.ProduceMultiTopicBatch(ctx, multiTopicBatch); err != nil {
-		log.Printf("Failed to send multi-topic batch: %v", err)
-	} else {
-		log.Println("Multi-topic batch sent successfully!")
 	}
 
 	// Flush remaining messages

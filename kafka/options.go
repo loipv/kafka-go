@@ -22,9 +22,6 @@ type ProducerConfig struct {
 	Compression Compression
 	Idempotent  bool
 
-	// Retry
-	Retry *RetryConfig
-
 	// Logging
 	Logger *slog.Logger
 
@@ -144,13 +141,6 @@ func ProducerWithCompression(compression Compression) ProducerOption {
 func ProducerWithIdempotent(enabled bool) ProducerOption {
 	return func(c *ProducerConfig) {
 		c.Idempotent = enabled
-	}
-}
-
-// ProducerWithRetry sets retry configuration
-func ProducerWithRetry(retry *RetryConfig) ProducerOption {
-	return func(c *ProducerConfig) {
-		c.Retry = retry
 	}
 }
 
