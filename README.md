@@ -425,14 +425,14 @@ How a message reaches the DLQ:
 
 - The record keeps the original key, value and headers. The partition is chosen by librdkafka from the key.
 - It gets these headers: `x-dlq-original-topic`, `x-dlq-timestamp` (RFC 3339), `x-dlq-handler-retry-count` (the number of times the handler was called: 1 for a batch handler) and, with `IncludeErrorInfo`, `x-dlq-error-message`.
-- The DLQ produce is a single attempt with `acks=all`, confirmed by its delivery report and bounded by the DLQ producer's `message.timeout.ms`: 30 seconds unless `DLQConfig.Raw` (or the consumer's `Raw`, when the DLQ is on the same cluster) sets `message.timeout.ms`. `delivery.timeout.ms` is accepted as an alias.
+- The DLQ produce is a single attempt with `acks=all`, confirmed by its delivery report and bounded by the DLQ producer's `message.timeout.ms`: 30 seconds unless the DLQ connection's raw config sets `message.timeout.ms` (`delivery.timeout.ms` is accepted as an alias). That is `ConsumerWithRawConfig` by default, and `DLQConfig.Raw` only when `DLQConfig.Brokers` points at a separate cluster.
 - When the produce fails or times out, the message is not parked: its partition blocks and the message is retried later. A broken DLQ therefore blocks the partitions of the messages it could not take, and nothing is dropped. Each attempt holds up the poll loop for up to the delivery timeout. The one exception is `SkipOnMaxRetries`.
 - When a batch fails, the messages the error handler did not claim are sent in one pass. If any of them fails, the whole batch blocks.
 - Confirmed sends are counted in `Metrics.SentToDLQ`, keyed by the source topic.
 
 `IncludeErrorInfo` caveats: the error text can contain sensitive data from the failed message, and it is truncated to 1024 bytes. Leave it off if your handler errors can echo payloads.
 
-**Separate cluster.** With empty `Brokers` (the default) the DLQ producer inherits the consumer's connection: brokers, SSL, SASL and `Raw`, and the `SSL`, `SASL` and `Raw` fields of `DLQConfig` are ignored. With `Brokers` set, the DLQ producer uses only the `SSL`, `SASL` and `Raw` of `DLQConfig`; nothing is inherited, so the consumer's credentials never reach another cluster.
+**Separate cluster.** With empty `Brokers` (the default) the DLQ producer inherits the consumer's connection: brokers, SSL, SASL and `Raw`, and the `SSL`, `SASL` and `Raw` fields of `DLQConfig` are ignored (`NewConsumer` logs a warning naming the ones that are set). With `Brokers` set, the DLQ producer uses only the `SSL`, `SASL` and `Raw` of `DLQConfig`; nothing is inherited, so the consumer's credentials never reach another cluster.
 
 ```go
 consumer, err := kafka.NewConsumer(

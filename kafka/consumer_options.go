@@ -77,8 +77,10 @@ type ConsumerConfig struct {
 // x-dlq-error-message.
 //
 // The DLQ produce is a single attempt, confirmed by its delivery report and
-// bounded by the DLQ producer's message.timeout.ms: 30s unless Raw sets
-// message.timeout.ms (delivery.timeout.ms is accepted as an alias). The
+// bounded by the DLQ producer's message.timeout.ms: 30s unless the DLQ
+// connection's raw config sets message.timeout.ms (delivery.timeout.ms is
+// accepted as an alias), which is ConsumerWithRawConfig by default and Raw here
+// only when Brokers is set. The
 // producer always uses acks=all. When the produce fails or times out the
 // message is not parked: its partition blocks and the message is retried later
 // (see the consumer's at-least-once behaviour), so a broken DLQ stalls only the
