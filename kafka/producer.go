@@ -138,7 +138,10 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 				break
 			}
 			var kerr ckafka.Error
-			if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull {
+			// An empty queue cannot drain, so queue-full there is permanent
+			// (e.g. the message alone exceeds queue.buffering.max.kbytes).
+			if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull ||
+				(pending == 0 && p.producer.Len() == 0) {
 				endSpan(m, err) // no report will ever arrive for this message
 				errs = append(errs, err)
 				break

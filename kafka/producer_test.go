@@ -2,8 +2,11 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 func TestProducer_CloseAfterAsyncReturnsPromptly(t *testing.T) {
@@ -77,5 +80,32 @@ func TestProducer_ProduceBatchLargerThanQueue(t *testing.T) {
 	}
 	if got := topicHighWatermark(t, mc.BootstrapServers(), topic); got != 1000 {
 		t.Errorf("high watermark = %d, want 1000", got)
+	}
+}
+
+// A message that can never fit the queue must fail fast, not retry forever.
+func TestProducer_ProduceBatchMessageLargerThanQueueFailsFast(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithRawConfig(map[string]any{"queue.buffering.max.kbytes": 1}))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.ProduceBatch(context.Background(), topic, []*Message{{Value: make([]byte, 4096)}})
+	}()
+	select {
+	case err := <-done:
+		var kerr ckafka.Error
+		if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull {
+			t.Fatalf("ProduceBatch(oversized message) = %v, want ErrQueueFull", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProduceBatch did not return within 5s: queue-full retry never terminates")
 	}
 }
