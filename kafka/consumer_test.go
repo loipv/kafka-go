@@ -397,3 +397,26 @@ func TestConsumer_NilHandlerAfterRegistration(t *testing.T) {
 		t.Fatalf("Start() = %v, want ErrNoHandler", err)
 	}
 }
+
+func TestConsumer_ClosedConsumerRejectsStartAndCommit(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(uniqueTopic(t, mc, 1)))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return nil })
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Start(context.Background()); !errors.Is(err, ErrConsumerClosed) {
+		t.Errorf("Start() after Close = %v, want ErrConsumerClosed", err)
+	}
+	if err := c.Commit(); !errors.Is(err, ErrConsumerClosed) {
+		t.Errorf("Commit() after Close = %v, want ErrConsumerClosed", err)
+	}
+	if err := c.Close(context.Background()); err != nil {
+		t.Errorf("second Close() = %v, want nil", err)
+	}
+}

@@ -157,6 +157,9 @@ func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler // #17
 	}
+	if atomic.LoadInt32(&c.closed) == 1 {
+		return ErrConsumerClosed
+	}
 	// Use atomic CAS to ensure only one Start can succeed
 	if !atomic.CompareAndSwapInt32(&c.running, 0, 1) {
 		return ErrConsumerRunning
@@ -688,6 +691,9 @@ const (
 // when messages are parked, not on consumption. Offsets are committed at
 // max(msg.Offset)+1 per (topic, partition).
 func (c *Consumer) Commit(msgs ...*Message) error {
+	if atomic.LoadInt32(&c.closed) == 1 {
+		return ErrConsumerClosed
+	}
 	if len(msgs) == 0 {
 		_, err := c.consumer.Commit()
 		return err
