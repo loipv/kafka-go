@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -731,5 +732,27 @@ func TestProcessMessage_DuplicateLogOmitsIdempotencyKey(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("log %q missing %s", got, want)
 		}
+	}
+}
+
+func TestIsFatalClientError(t *testing.T) {
+	fatal := ckafka.NewError(ckafka.ErrFencedInstanceID, "fenced", true)
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"fatal", fatal, true},
+		{"non-fatal", ckafka.NewError(ckafka.ErrTransport, "x", false), false},
+		{"wrapped fatal", fmt.Errorf("wrap: %w", fatal), true},
+		{"plain", errors.New("plain"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isFatalClientError(tt.err); got != tt.want {
+				t.Errorf("isFatalClientError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

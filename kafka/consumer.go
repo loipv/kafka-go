@@ -174,7 +174,14 @@ func (c *Consumer) batchMode() bool {
 	return c.batchHandler != nil || c.groupedBatchHandler != nil
 }
 
-// Start starts consuming messages (blocking)
+// isFatalClientError reports whether err is (or wraps) a fatal librdkafka error.
+func isFatalClientError(err error) bool {
+	var ke ckafka.Error
+	return errors.As(err, &ke) && ke.IsFatal()
+}
+
+// Start starts consuming messages (blocking). It returns on context
+// cancellation, on Close, or on a fatal client error.
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler // #17
@@ -226,6 +233,11 @@ func (c *Consumer) Start(ctx context.Context) error {
 				var ke ckafka.Error
 				if errors.As(err, &ke) && ke.Code() == ckafka.ErrTimedOut {
 					continue
+				}
+				if isFatalClientError(err) {
+					// The client is unusable; spinning on it would only spam the log.
+					c.logger.Error("fatal consumer error", "error", err)
+					return fmt.Errorf("fatal consumer error: %w", err)
 				}
 				// Log other errors but continue
 				c.logger.Warn("read message failed", "error", err)
