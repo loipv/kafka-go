@@ -496,4 +496,27 @@ func TestIntegrationConsumerLag(t *testing.T) {
 	if res := hc.CheckConsumerLag(context.Background(), group, 200); res.Status != HealthStatusUp {
 		t.Errorf("CheckConsumerLag(maxLag=200) = %s (%s), want UP with lag 90", res.Status, res.Error)
 	}
+
+	t.Run("unknown group is DOWN not found", func(t *testing.T) {
+		res := hc.CheckConsumerLag(context.Background(), uniqueGroupName(t), 50)
+		if res.Status != HealthStatusDown || !strings.Contains(res.Error, "not found") {
+			t.Errorf("unknown group = %s (%q), want DOWN containing %q", res.Status, res.Error, "not found")
+		}
+		if res.Details["groupId"] == nil {
+			t.Errorf("Details[groupId] unset: %v", res.Details)
+		}
+	})
+
+	t.Run("1ms deadline returns DOWN promptly", func(t *testing.T) {
+		dctx, dcancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer dcancel()
+		start := time.Now()
+		res := hc.CheckConsumerLag(dctx, group, 50)
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("took %v with a 1ms deadline, want < 2s", elapsed)
+		}
+		if res.Status != HealthStatusDown {
+			t.Errorf("status = %s, want DOWN", res.Status)
+		}
+	})
 }

@@ -132,34 +132,6 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	default:
 	}
 
-	// Get consumer group offsets
-	groups, err := h.admin.ListConsumerGroups(ctx)
-	if err != nil {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  err.Error(),
-		}
-	}
-
-	// Check if group exists
-	groupFound := false
-	for _, g := range groups.Valid {
-		if g.GroupID == groupID {
-			groupFound = true
-			break
-		}
-	}
-
-	if !groupFound {
-		return &HealthResult{
-			Status: HealthStatusDown,
-			Error:  fmt.Sprintf("consumer group not found: %s", groupID),
-			Details: map[string]any{
-				"groupId": groupID,
-			},
-		}
-	}
-
 	// Describe consumer groups to get member information
 	describeResult, err := h.admin.DescribeConsumerGroups(ctx, []string{groupID})
 	if err != nil {
@@ -181,6 +153,27 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 
 	groupDesc := describeResult.ConsumerGroupDescriptions[0]
 
+	// A group the broker has never seen comes back as a Dead description
+	// (Redpanda reports no error code); Kafka may instead answer GROUP_ID_NOT_FOUND.
+	if groupDesc.State == ckafka.ConsumerGroupStateDead || groupDesc.Error.Code() == ckafka.ErrGroupIDNotFound {
+		return &HealthResult{
+			Status: HealthStatusDown,
+			Error:  fmt.Sprintf("consumer group not found: %s", groupID),
+			Details: map[string]any{
+				"groupId": groupID,
+			},
+		}
+	}
+	if groupDesc.Error.Code() != ckafka.ErrNoError {
+		return &HealthResult{
+			Status: HealthStatusDown,
+			Error:  groupDesc.Error.Error(),
+			Details: map[string]any{
+				"groupId": groupID,
+			},
+		}
+	}
+
 	// Get committed offsets
 	offsetResult, err := h.admin.ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{
 		{Group: groupID},
@@ -200,7 +193,19 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 			if tp.Offset < 0 || tp.Topic == nil {
 				continue
 			}
-			_, high, err := h.producer.QueryWatermarkOffsets(*tp.Topic, tp.Partition, int(h.timeout.Milliseconds()))
+			// Re-clamp per query so the ctx deadline bounds the whole check,
+			// and never hand librdkafka a non-positive timeout.
+			timeoutMs := int(h.deadlineTimeout(ctx).Milliseconds())
+			if timeoutMs <= 0 {
+				return &HealthResult{
+					Status: HealthStatusDown,
+					Error:  context.DeadlineExceeded.Error(),
+					Details: map[string]any{
+						"groupId": groupID,
+					},
+				}
+			}
+			_, high, err := h.producer.QueryWatermarkOffsets(*tp.Topic, tp.Partition, timeoutMs)
 			if err != nil {
 				return &HealthResult{
 					Status: HealthStatusDown,
