@@ -346,9 +346,9 @@ func boolToInt32(b bool) int32 {
 	return 0
 }
 
-// DLQMetrics returns DLQ metrics
-func (c *Consumer) DLQMetrics() *DLQMetrics {
-	return c.metrics.getMetrics()
+// Metrics returns a snapshot of the consumer's handler-failure and DLQ counters.
+func (c *Consumer) Metrics() *Metrics {
+	return c.metrics.snapshot()
 }
 
 // convertMessage converts ckafka.Message to Message
@@ -454,7 +454,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 		}
 
 		lastErr = err
-		c.metrics.incrementHandlerRetries(msg.Topic)
+		c.metrics.incHandlerFailures(msg.Topic)
 
 		if attempt < maxRetries {
 			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
@@ -703,7 +703,7 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
-				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "assigned", Partitions: convertPartitions(e.Partitions)}); err != nil {
+				if err := c.config.RebalanceCallback(RebalanceEvent{Type: RebalanceAssigned, Partitions: convertPartitions(e.Partitions)}); err != nil {
 					c.logger.Error("rebalance callback error on assign", "error", err)
 					return err
 				}
@@ -719,7 +719,7 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
-				if err := c.config.RebalanceCallback(RebalanceEvent{Type: "revoked", Partitions: convertPartitions(e.Partitions)}); err != nil {
+				if err := c.config.RebalanceCallback(RebalanceEvent{Type: RebalanceRevoked, Partitions: convertPartitions(e.Partitions)}); err != nil {
 					c.logger.Error("rebalance callback error on revoke", "error", err)
 					return err
 				}

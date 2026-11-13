@@ -324,20 +324,3 @@ func (p *Producer) reportDeliveryError(ev *ckafka.Message, err error) {
 	}
 	p.logger.Error("async delivery failed", "topic", msg.Topic, "error", err)
 }
-
-// Helper functions
-
-func getCompressionName(compression Compression) string {
-	switch compression {
-	case CompressionGZIP:
-		return "gzip"
-	case CompressionSnappy:
-		return "snappy"
-	case CompressionLZ4:
-		return "lz4"
-	case CompressionZSTD:
-		return "zstd"
-	default:
-		return "none"
-	}
-}

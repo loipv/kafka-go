@@ -98,7 +98,7 @@ func main() {
 		// Rebalance callback for partition management
 		kafka.ConsumerWithRebalanceCallback(func(event kafka.RebalanceEvent) error {
 			switch event.Type {
-			case "assigned":
+			case kafka.RebalanceAssigned:
 				log.Println("=== PARTITIONS ASSIGNED ===")
 				for _, tp := range event.Partitions {
 					log.Printf("  + Assigned: %s [%d] @ offset %d",
@@ -112,7 +112,7 @@ func main() {
 				}
 				log.Println("===========================")
 
-			case "revoked":
+			case kafka.RebalanceRevoked:
 				log.Println("=== PARTITIONS REVOKED ===")
 				for _, tp := range event.Partitions {
 					log.Printf("  - Revoked: %s [%d]", tp.Topic, tp.Partition)

@@ -15,7 +15,6 @@ import (
 type HealthChecker struct {
 	producer *ckafka.Producer
 	admin    *ckafka.AdminClient
-	timeout  time.Duration
 }
 
 // NewHealthChecker creates a health checker that owns its producer.
@@ -41,7 +40,6 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	return &HealthChecker{
 		producer: p,
 		admin:    admin,
-		timeout:  10 * time.Second,
 	}, nil
 }
 
@@ -52,20 +50,16 @@ func (h *HealthChecker) Close() error {
 	return nil
 }
 
-// SetTimeout sets the health check timeout
-func (h *HealthChecker) SetTimeout(timeout time.Duration) {
-	h.timeout = timeout
-}
+// defaultHealthTimeout bounds a broker query when the context has no deadline.
+const defaultHealthTimeout = 10 * time.Second
 
-// deadlineTimeout clamps the health check timeout to the context deadline.
+// deadlineTimeout is how long a broker query may take: the time left until
+// the context deadline, or defaultHealthTimeout when ctx has none.
 func (h *HealthChecker) deadlineTimeout(ctx context.Context) time.Duration {
-	timeout := h.timeout
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
+		return time.Until(deadline)
 	}
-	return timeout
+	return defaultHealthTimeout
 }
 
 // queryTimeoutMs is how long one broker query may take, in milliseconds. It

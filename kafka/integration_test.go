@@ -283,8 +283,9 @@ func TestIntegrationSASL_ProduceConsumeDLQHealth(t *testing.T) {
 		t.Fatalf("NewHealthChecker: %v", err)
 	}
 	defer hc.Close()
-	hc.SetTimeout(5 * time.Second)
-	if res := hc.Check(context.Background()); res.Status != HealthStatusUp {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if res := hc.Check(ctx); res.Status != HealthStatusUp {
 		t.Errorf("Check() over SASL = %s (%s), want UP", res.Status, res.Error)
 	}
 }
@@ -300,9 +301,9 @@ func (r *eventRecorder) callback(ev RebalanceEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch ev.Type {
-	case "assigned":
+	case RebalanceAssigned:
 		r.net += len(ev.Partitions)
-	case "revoked":
+	case RebalanceRevoked:
 		r.net -= len(ev.Partitions)
 	}
 	return nil

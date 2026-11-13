@@ -122,8 +122,8 @@ func (c *ConsumerConfig) dlqTimeout() time.Duration {
 func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	cm := c.conn().configMap()
 	cm["acks"] = int(c.Acks)
-	if c.Compression != CompressionNone {
-		cm["compression.type"] = getCompressionName(c.Compression)
+	if c.Compression != "" && c.Compression != CompressionNone {
+		cm["compression.type"] = string(c.Compression)
 	}
 	if c.Idempotent {
 		cm["enable.idempotence"] = true

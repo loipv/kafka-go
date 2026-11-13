@@ -85,7 +85,7 @@ func TestAtLeastOnce_NoDLQ_BlocksPartition(t *testing.T) {
 	// With no DLQ and no error handler the message is unparkable: the
 	// partition must block and the committed offset must never advance.
 	waitFor(t, 10*time.Second, func() bool {
-		return len(c.DLQMetrics().BlockedPartitions) > 0
+		return len(c.Metrics().BlockedPartitions) > 0
 	}, "partition never reported blocked for unparkable message")
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -197,7 +197,7 @@ func TestPartitionIsolation(t *testing.T) {
 		return committedOffset(t, mc.BootstrapServers(), group, topic, 1) >= 2
 	}, "partition 1 committed offset never advanced")
 	waitFor(t, 10*time.Second, func() bool {
-		for _, tp := range c.DLQMetrics().BlockedPartitions {
+		for _, tp := range c.Metrics().BlockedPartitions {
 			if tp.Topic == topic && tp.Partition == 0 {
 				return true
 			}
@@ -254,7 +254,7 @@ func TestBlockedPartition_RecoversUnattended(t *testing.T) {
 		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) >= 1
 	}, "blocked partition never recovered unattended (offset not committed)")
 	waitFor(t, 10*time.Second, func() bool {
-		return len(c.DLQMetrics().BlockedPartitions) == 0
+		return len(c.Metrics().BlockedPartitions) == 0
 	}, "BlockedPartitions never drained after recovery")
 	mu.Lock()
 	got := invocations[0]
@@ -280,7 +280,7 @@ func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
 	if len(snap) != 1 || snap[0].Topic != "t1" || snap[0].Partition != 1 {
 		t.Fatalf("after dropBlockedFor(p0): %+v, want only t1/1", snap)
 	}
-	if m := c.metrics.getMetrics(); len(m.BlockedPartitions) != 1 || m.BlockedPartitions[0].Partition != 1 {
+	if m := c.metrics.snapshot(); len(m.BlockedPartitions) != 1 || m.BlockedPartitions[0].Partition != 1 {
 		t.Errorf("metrics blocked partitions = %+v, want [t1/1]", m.BlockedPartitions)
 	}
 	c.dropBlockedFor([]ckafka.TopicPartition{{Partition: 7}}) // nil Topic must be skipped, not panic
@@ -304,7 +304,7 @@ func TestClearBlockedOnPark(t *testing.T) {
 	if len(c.blockedSnapshot()) != 0 {
 		t.Error("park at the blocked offset must clear state")
 	}
-	if got := c.metrics.getMetrics().BlockedPartitions; len(got) != 0 {
+	if got := c.metrics.snapshot().BlockedPartitions; len(got) != 0 {
 		t.Errorf("blocked gauge = %+v, want drained", got)
 	}
 }

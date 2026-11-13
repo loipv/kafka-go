@@ -101,9 +101,9 @@ func TestDLQ_MetricsKeyedBySourceTopic(t *testing.T) {
 		return committedOffset(t, mc.BootstrapServers(), group, source, 0) >= 1
 	}, "source offset never advanced past the DLQ-parked message")
 
-	m := c.DLQMetrics()
-	if m.Global.MessagesSentToDLQ != 1 {
-		t.Errorf("Global.MessagesSentToDLQ = %d, want 1", m.Global.MessagesSentToDLQ)
+	m := c.Metrics()
+	if m.SentToDLQ != 1 {
+		t.Errorf("SentToDLQ = %d, want 1", m.SentToDLQ)
 	}
 	if m.ByTopic[source].SentToDLQ != 1 {
 		t.Errorf("ByTopic[source].SentToDLQ = %d, want 1", m.ByTopic[source].SentToDLQ)
@@ -154,19 +154,37 @@ func TestDLQ_BatchFailureSendsWholeBatch(t *testing.T) {
 	waitFor(t, 10*time.Second, func() bool {
 		return committedOffset(t, mc.BootstrapServers(), group, source, 0) == 5
 	}, "source offset never advanced past the DLQ-parked batch")
-	if got := c.DLQMetrics().Global.MessagesSentToDLQ; got != 5 {
-		t.Errorf("Global.MessagesSentToDLQ = %d, want 5", got)
+	if got := c.Metrics().SentToDLQ; got != 5 {
+		t.Errorf("SentToDLQ = %d, want 5", got)
 	}
 }
 
-func TestDLQMetricsBlockedGauge(t *testing.T) {
+func TestMetricsSnapshotCounts(t *testing.T) {
+	m := newMetricsCollector()
+	m.incHandlerFailures("a")
+	m.incHandlerFailures("a")
+	m.incHandlerFailures("b")
+	m.incSentToDLQ("a")
+	got := m.snapshot()
+	if got.HandlerFailures != 3 || got.SentToDLQ != 1 {
+		t.Errorf("totals = (%d failures, %d dlq), want (3, 1)", got.HandlerFailures, got.SentToDLQ)
+	}
+	if a := got.ByTopic["a"]; a != (TopicMetrics{HandlerFailures: 2, SentToDLQ: 1}) {
+		t.Errorf("ByTopic[a] = %+v, want {2 1}", a)
+	}
+	if b := got.ByTopic["b"]; b != (TopicMetrics{HandlerFailures: 1}) {
+		t.Errorf("ByTopic[b] = %+v, want {1 0}", b)
+	}
+}
+
+func TestMetricsBlockedGauge(t *testing.T) {
 	m := newMetricsCollector()
 	m.setBlocked([]TopicPartition{{Topic: "t", Partition: 1}})
-	if got := m.getMetrics().BlockedPartitions; len(got) != 1 || got[0].Partition != 1 {
+	if got := m.snapshot().BlockedPartitions; len(got) != 1 || got[0].Partition != 1 {
 		t.Errorf("BlockedPartitions = %v, want one entry for t[1]", got)
 	}
 	m.setBlocked(nil)
-	if got := m.getMetrics().BlockedPartitions; len(got) != 0 {
+	if got := m.snapshot().BlockedPartitions; len(got) != 0 {
 		t.Errorf("BlockedPartitions after clear = %v, want empty", got)
 	}
 }

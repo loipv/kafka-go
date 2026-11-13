@@ -29,7 +29,7 @@ func TestLagForPartition(t *testing.T) {
 }
 
 func TestQueryTimeoutMs(t *testing.T) {
-	h := &HealthChecker{timeout: 10 * time.Second}
+	h := &HealthChecker{} // zero value: defaultHealthTimeout (10s) when ctx has no deadline
 
 	t.Run("cancelled context returns its error", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

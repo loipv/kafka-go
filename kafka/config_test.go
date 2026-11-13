@@ -246,6 +246,14 @@ func TestBuildProducerConfig(t *testing.T) {
 			}
 		}
 	})
+	t.Run("empty and none compression omit compression.type", func(t *testing.T) {
+		for name, c := range map[string]Compression{"empty": "", "none": CompressionNone} {
+			cm := buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"}, Compression: c})
+			if v, _ := cm.Get("compression.type", nil); v != nil {
+				t.Errorf("%s: compression.type = %v, want omitted", name, v)
+			}
+		}
+	})
 	t.Run("zero timeouts and none compression omit their keys", func(t *testing.T) {
 		cm := buildProducerConfig(&ProducerConfig{Brokers: []string{"b:9092"}})
 		if v, _ := cm.Get("request.timeout.ms", nil); v != nil {

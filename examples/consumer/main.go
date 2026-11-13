@@ -120,9 +120,9 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Print DLQ metrics before closing
-	metrics := consumer.DLQMetrics()
-	log.Printf("DLQ Metrics: %+v", metrics.Global)
+	// Print metrics before closing
+	metrics := consumer.Metrics()
+	log.Printf("Metrics: handler failures=%d, sent to DLQ=%d", metrics.HandlerFailures, metrics.SentToDLQ)
 
 	if err := consumer.Close(shutdownCtx); err != nil {
 		log.Printf("Error closing consumer: %v", err)

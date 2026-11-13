@@ -47,20 +47,21 @@ const (
 	AcksAll Acks = -1
 )
 
-// Compression types for message compression
-type Compression int
+// Compression is a message compression codec. Its values are the
+// librdkafka compression.type names; the empty value means no compression.
+type Compression string
 
 const (
 	// CompressionNone - No compression
-	CompressionNone Compression = 0
+	CompressionNone Compression = "none"
 	// CompressionGZIP - GZIP compression
-	CompressionGZIP Compression = 1
+	CompressionGZIP Compression = "gzip"
 	// CompressionSnappy - Snappy compression
-	CompressionSnappy Compression = 2
+	CompressionSnappy Compression = "snappy"
 	// CompressionLZ4 - LZ4 compression
-	CompressionLZ4 Compression = 3
+	CompressionLZ4 Compression = "lz4"
 	// CompressionZSTD - ZSTD compression
-	CompressionZSTD Compression = 4
+	CompressionZSTD Compression = "zstd"
 )
 
 // PartitionAssignor represents partition assignment strategy
@@ -111,10 +112,20 @@ type ErrorHandler func(ctx context.Context, msg *Message, err error) error
 // IdempotencyKeyFunc extracts idempotency key from message
 type IdempotencyKeyFunc func(msg *Message) string
 
+// RebalanceType says whether a rebalance event assigned or revoked partitions.
+type RebalanceType string
+
+const (
+	// RebalanceAssigned means partitions were assigned to this consumer.
+	RebalanceAssigned RebalanceType = "assigned"
+	// RebalanceRevoked means partitions were revoked from this consumer.
+	RebalanceRevoked RebalanceType = "revoked"
+)
+
 // RebalanceEvent represents a partition rebalance event
 type RebalanceEvent struct {
-	// Type is either "assigned" or "revoked"
-	Type string
+	// Type is RebalanceAssigned or RebalanceRevoked
+	Type RebalanceType
 	// Partitions contains the affected topic-partitions
 	Partitions []TopicPartition
 }
@@ -130,21 +141,25 @@ type TopicPartition struct {
 // Return an error to abort the rebalance (use with caution)
 type RebalanceCallback func(event RebalanceEvent) error
 
-// DLQMetrics represents DLQ metrics
-type DLQMetrics struct {
-	Global            DLQGlobalMetrics           `json:"global"`
-	ByTopic           map[string]DLQTopicMetrics `json:"byTopic"`
-	BlockedPartitions []TopicPartition           `json:"blockedPartitions,omitempty"`
+// Metrics is a snapshot of the consumer's handler-failure and DLQ counters.
+type Metrics struct {
+	// HandlerFailures counts every failed handler invocation, including the
+	// first attempt, not only the retries after it.
+	HandlerFailures int64 `json:"handlerFailures"`
+	// SentToDLQ counts messages whose DLQ produce was confirmed.
+	SentToDLQ int64 `json:"sentToDlq"`
+	// ByTopic breaks both counters down by source topic.
+	ByTopic map[string]TopicMetrics `json:"byTopic"`
+	// BlockedPartitions lists the partitions currently blocked on an
+	// unparkable message.
+	BlockedPartitions []TopicPartition `json:"blockedPartitions,omitempty"`
 }
 
-// DLQGlobalMetrics represents global DLQ metrics
-type DLQGlobalMetrics struct {
-	HandlerRetries    int64 `json:"handlerRetries"`
-	MessagesSentToDLQ int64 `json:"messagesSentToDlq"`
-}
-
-// DLQTopicMetrics represents per-topic DLQ metrics
-type DLQTopicMetrics struct {
-	HandlerRetries int64 `json:"handlerRetries"`
-	SentToDLQ      int64 `json:"sentToDlq"`
+// TopicMetrics holds the counters for one source topic.
+type TopicMetrics struct {
+	// HandlerFailures counts every failed handler invocation, including the
+	// first attempt, for messages from this topic.
+	HandlerFailures int64 `json:"handlerFailures"`
+	// SentToDLQ counts messages from this topic whose DLQ produce was confirmed.
+	SentToDLQ int64 `json:"sentToDlq"`
 }

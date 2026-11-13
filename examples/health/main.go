@@ -20,9 +20,6 @@ func main() {
 	}
 	defer func() { _ = healthChecker.Close() }()
 
-	// Set custom timeout
-	healthChecker.SetTimeout(5 * time.Second)
-
 	// Basic health check endpoint
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

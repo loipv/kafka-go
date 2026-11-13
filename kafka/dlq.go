@@ -143,7 +143,7 @@ func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause erro
 				errs = append(errs, err)
 				continue
 			}
-			s.metrics.incrementSentToDLQ(source)
+			s.metrics.incSentToDLQ(source)
 		case <-ctx.Done():
 			// Unconfirmed messages are not counted; their reports land in the
 			// buffered channel and are dropped with it.
@@ -181,10 +181,10 @@ func (s *dlqService) Close() error {
 	return nil
 }
 
-// metricsCollector collects DLQ metrics
+// metricsCollector collects handler-failure and DLQ metrics
 type metricsCollector struct {
-	global  DLQGlobalMetrics
-	byTopic map[string]*DLQTopicMetrics
+	global  TopicMetrics
+	byTopic map[string]*TopicMetrics
 	blocked []TopicPartition
 	mu      sync.RWMutex
 }
@@ -192,13 +192,13 @@ type metricsCollector struct {
 // newMetricsCollector creates a new metrics collector
 func newMetricsCollector() *metricsCollector {
 	return &metricsCollector{
-		byTopic: make(map[string]*DLQTopicMetrics),
+		byTopic: make(map[string]*TopicMetrics),
 	}
 }
 
 // getOrCreateTopicMetrics returns existing topic metrics or creates new one
 // Uses double-checked locking for optimal performance
-func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *DLQTopicMetrics {
+func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *TopicMetrics {
 	// Fast path: check with RLock (most common case - topic already exists)
 	m.mu.RLock()
 	metrics, ok := m.byTopic[topic]
@@ -217,21 +217,21 @@ func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *DLQTopicMetric
 		return metrics
 	}
 
-	metrics = &DLQTopicMetrics{}
+	metrics = &TopicMetrics{}
 	m.byTopic[topic] = metrics
 	return metrics
 }
 
-// incrementHandlerRetries increments handler retry count
-func (m *metricsCollector) incrementHandlerRetries(topic string) {
-	atomic.AddInt64(&m.global.HandlerRetries, 1)
+// incHandlerFailures counts one failed handler invocation for topic.
+func (m *metricsCollector) incHandlerFailures(topic string) {
+	atomic.AddInt64(&m.global.HandlerFailures, 1)
 	metrics := m.getOrCreateTopicMetrics(topic)
-	atomic.AddInt64(&metrics.HandlerRetries, 1)
+	atomic.AddInt64(&metrics.HandlerFailures, 1)
 }
 
-// incrementSentToDLQ increments sent to DLQ count
-func (m *metricsCollector) incrementSentToDLQ(topic string) {
-	atomic.AddInt64(&m.global.MessagesSentToDLQ, 1)
+// incSentToDLQ counts one confirmed DLQ produce for the source topic.
+func (m *metricsCollector) incSentToDLQ(topic string) {
+	atomic.AddInt64(&m.global.SentToDLQ, 1)
 	metrics := m.getOrCreateTopicMetrics(topic)
 	atomic.AddInt64(&metrics.SentToDLQ, 1)
 }
@@ -243,24 +243,22 @@ func (m *metricsCollector) setBlocked(tps []TopicPartition) {
 	m.blocked = tps
 }
 
-// getMetrics returns all metrics
-func (m *metricsCollector) getMetrics() *DLQMetrics {
+// snapshot returns a copy of all metrics.
+func (m *metricsCollector) snapshot() *Metrics {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	byTopic := make(map[string]DLQTopicMetrics)
+	byTopic := make(map[string]TopicMetrics)
 	for k, v := range m.byTopic {
-		byTopic[k] = DLQTopicMetrics{
-			HandlerRetries: atomic.LoadInt64(&v.HandlerRetries),
-			SentToDLQ:      atomic.LoadInt64(&v.SentToDLQ),
+		byTopic[k] = TopicMetrics{
+			HandlerFailures: atomic.LoadInt64(&v.HandlerFailures),
+			SentToDLQ:       atomic.LoadInt64(&v.SentToDLQ),
 		}
 	}
 
-	return &DLQMetrics{
-		Global: DLQGlobalMetrics{
-			HandlerRetries:    atomic.LoadInt64(&m.global.HandlerRetries),
-			MessagesSentToDLQ: atomic.LoadInt64(&m.global.MessagesSentToDLQ),
-		},
+	return &Metrics{
+		HandlerFailures:   atomic.LoadInt64(&m.global.HandlerFailures),
+		SentToDLQ:         atomic.LoadInt64(&m.global.SentToDLQ),
 		ByTopic:           byTopic,
 		BlockedPartitions: append([]TopicPartition(nil), m.blocked...),
 	}

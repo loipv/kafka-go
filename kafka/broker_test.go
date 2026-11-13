@@ -610,15 +610,15 @@ func TestDLQBrokerDown_BlocksInsteadOfDropping(t *testing.T) {
 	close(gate) // ...and let the handler start failing
 
 	waitFor(t, 30*time.Second, func() bool {
-		for _, tp := range c.DLQMetrics().BlockedPartitions {
+		for _, tp := range c.Metrics().BlockedPartitions {
 			if tp.Topic == source && tp.Partition == 0 {
 				return true
 			}
 		}
 		return false
 	}, "source partition never blocked while the DLQ broker was down")
-	if got := c.DLQMetrics().Global.MessagesSentToDLQ; got != 0 {
-		t.Errorf("MessagesSentToDLQ = %d with the broker down, want 0 (no confirmed produce)", got)
+	if got := c.Metrics().SentToDLQ; got != 0 {
+		t.Errorf("SentToDLQ = %d with the broker down, want 0 (no confirmed produce)", got)
 	}
 
 	// Blocked means blocked: no commit for ~3s. With the broker down nothing
@@ -682,7 +682,7 @@ func TestBlockedPartition_NoOffsetDrift(t *testing.T) {
 	waitFor(t, 10*time.Second, func() bool { return atomic.LoadInt32(&p1Count) == 1 },
 		"partition 1 message never processed while partition 0 was failing")
 	waitFor(t, 10*time.Second, func() bool {
-		for _, tp := range c.DLQMetrics().BlockedPartitions {
+		for _, tp := range c.Metrics().BlockedPartitions {
 			if tp.Topic == topic && tp.Partition == 0 {
 				return true
 			}
@@ -717,9 +717,15 @@ func TestHealthCheckAgainstMockCluster(t *testing.T) {
 		t.Fatalf("NewHealthChecker: %v", err)
 	}
 	defer hc.Close()
-	hc.SetTimeout(2 * time.Second) // DOWN must be detected well inside waitFor
 
-	if res := hc.Check(context.Background()); res.Status != HealthStatusUp {
+	// Each check gets a 2s deadline so DOWN is detected well inside waitFor.
+	check := func() *HealthResult {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return hc.Check(ctx)
+	}
+
+	if res := check(); res.Status != HealthStatusUp {
 		t.Fatalf("Check() = %s (%s), want UP", res.Status, res.Error)
 	}
 
@@ -728,6 +734,6 @@ func TestHealthCheckAgainstMockCluster(t *testing.T) {
 		t.Fatalf("SetBrokerDown: %v", err)
 	}
 	waitFor(t, 20*time.Second, func() bool {
-		return hc.Check(context.Background()).Status == HealthStatusDown
+		return check().Status == HealthStatusDown
 	}, "Check() never reported DOWN with the only broker down")
 }
