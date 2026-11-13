@@ -1,51 +1,53 @@
-// Package kafka provides a production-ready Kafka producer and consumer
-// library built on top of confluent-kafka-go.
+// Package kafka provides a Kafka producer and consumer built on
+// confluent-kafka-go (librdkafka).
 //
 // Features:
-//   - High-performance producer with Produce(), ProduceBatch(), ProduceAsync() methods
-//   - Handler-based consumer with single-message, batch, and key-grouped dispatch
-//   - At-least-once delivery: offsets are stored only when a message is parked
-//     (processed, confirmed to the DLQ, or claimed by the error handler)
-//   - Unparkable messages block their partition with escalating backoff
-//     instead of being dropped; SkipOnMaxRetries is the explicit loss opt-in
-//   - Intelligent batch processing with configurable size and timeout
-//   - Key-based grouping within batches for ordered processing
-//   - In-memory idempotency with TTL
-//   - Dead Letter Queue (DLQ); a failed DLQ produce blocks the partition
-//   - OpenTelemetry distributed tracing
-//   - Built-in health checks
-//   - Graceful shutdown support
+//   - Producer with synchronous Produce and ProduceBatch (back-pressure when
+//     the client queue is full) and fire-and-forget ProduceAsync
+//   - Handler-based consumer: one active handler, OnMessage, OnBatch or
+//     OnGroupedBatch, and its mode follows it
+//   - At-least-once delivery: an offset is stored only once a message is
+//     parked (processed, confirmed on the DLQ or claimed by the error
+//     handler); an unparkable message blocks its partition with escalating
+//     backoff instead of being dropped
+//   - Dead Letter Queue: a single confirmed produce per message, optionally to
+//     a separate cluster
+//   - In-memory idempotency filter (per process, lost on restart)
+//   - OpenTelemetry tracing with W3C trace-context propagation
+//   - Health checks for brokers, topics and consumer lag
 //
 // Quick Start:
 //
-//	// Create producer
-//	producer, err := kafka.NewProducer(
-//	    kafka.ProducerWithBrokers("localhost:9092"),
-//	    kafka.ProducerWithClientID("my-app"),
-//	)
+//	producer, err := kafka.NewProducer(kafka.ProducerWithBrokers("localhost:9092"))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer producer.Close()
 //
-//	// Produce message
-//	err = producer.Produce(ctx, "topic", &kafka.Message{
-//	    Key:   []byte("key"),
-//	    Value: []byte("value"),
+//	err = producer.Produce(ctx, "orders", &kafka.Message{
+//	    Key:   []byte("order-1"),
+//	    Value: []byte(`{"id":"order-1"}`),
 //	})
 //
-//	// Create consumer
 //	consumer, err := kafka.NewConsumer(
 //	    kafka.ConsumerWithBrokers("localhost:9092"),
 //	    kafka.ConsumerWithGroupID("my-group"),
-//	    kafka.ConsumerWithTopics("topic"),
+//	    kafka.ConsumerWithTopics("orders"),
 //	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
-//	// Register handler
+//	// Register one handler before Start; nil parks the message.
 //	consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
-//	    // Process message
 //	    return nil
 //	})
 //
-//	// Start consuming
-//	err = consumer.Start(ctx)
+//	err = consumer.Start(ctx) // blocks until ctx is cancelled
+//	_ = consumer.Close(context.Background())
+//
+// See the README for configuration, delivery semantics and examples.
 package kafka
 
-// Version of the library
-const Version = "1.1.0"
+// Version is the library version.
+const Version = "1.2.0"
