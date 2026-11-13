@@ -63,7 +63,7 @@ All library code lives in `kafka/`. There are **no interfaces for the producer/c
 
 `enable.auto.offset.store=false` always. An offset is stored (via `StoreOffsets`) only when a message is *parked*: the handler succeeded, the DLQ produce was confirmed, the `ErrorHandler` returned `nil`, it was an idempotency duplicate, or `SkipOnMaxRetries` dropped it (the explicit opt-in to loss). Anything unparkable (no DLQ, DLQ produce failed) **blocks its partition**: pause, seek back, retry after an escalating wait (`InitialInterval` doubling to `MaxInterval`, default 30s). Other partitions keep flowing, and the wait itself never sleeps the poll loop: it is reconciled each pass of the loop along with pause/resume.
 
-Not everything is non-blocking. Single-message handler retries and the DLQ delivery wait run **on the poll loop** and stop consumption of every partition while they last. `max.poll.interval.ms` is derived to cover them: max(explicit `ConsumerWithRebalanceTimeout`, (retry budget + DLQ delivery timeout) x 1.5, 300s). The DLQ delivery timeout is 30s unless `DLQConfig.Raw` sets `message.timeout.ms`/`delivery.timeout.ms`.
+Not everything is non-blocking. Single-message handler retries and the DLQ delivery wait run **on the poll loop** and stop consumption of every partition while they last. `max.poll.interval.ms` is derived to cover them: max(explicit `ConsumerWithRebalanceTimeout`, (retry budget + DLQ delivery timeout) x 1.5, 300s). The DLQ delivery timeout is 30s unless the DLQ connection's raw config sets `message.timeout.ms` (or its alias `delivery.timeout.ms`): that is `ConsumerWithRawConfig` by default, and `DLQConfig.Raw` only when `DLQConfig.Brokers` points at a separate cluster (`dlqConn()` in `config.go`).
 
 The consumer's mode follows the registered handler (one active handler; there are no batch flags). In batch mode a batch handler is not retried in place. A failed batch is offered to the `ErrorHandler` message by message, its unclaimed messages go to the DLQ in one pass, and otherwise the whole batch blocks and is redelivered. Idempotency keys are recorded only for successful batches, so the in-memory filter does not deduplicate a redelivered failed batch; handlers must tolerate duplicates.
 
@@ -77,7 +77,7 @@ The consumer's mode follows the registered handler (one active handler; there ar
 ### Concurrency
 
 - User handlers (message, batch, grouped batch, `ErrorHandler`) run on the goroutine that called `Start`, the only one that polls. The exception is the final batch flush in `Close`, which runs on the goroutine calling `Close` after the consume loop exited (or after `Close`'s 5s wait for it).
-- `batchFlushLoop` (batch mode only) is a ticker that does a non-blocking send on `flushCh`; the poll loop does the flush. Rebalance callbacks run on whichever goroutine is polling the client.
+- `batchFlushLoop` (batch mode only) is a ticker that does a non-blocking send on `flushCh`; the poll loop does the flush. Rebalance callbacks run on whichever goroutine is polling the client. The `ProducerWithDeliveryErrorHandler` handler runs on the producer's delivery-report goroutine (`handleDeliveryReports`), so it must not block for long.
 - `Pause`, `Resume`, `Metrics` and `Commit` are safe from any goroutine; `On*` registration is not synchronised and must precede `Start`.
 - `Producer` runs one delivery-report goroutine (`handleDeliveryReports`), waited on in `Close`. The idempotency store runs one cleanup goroutine, stopped by its `close`.
 - State flags are `atomic.Bool` (`running` is a CAS with a deferred reset); `mu` guards `loopExited`, `batchMu` the batch, `blockMu` the blocked map.
@@ -110,7 +110,7 @@ func WithJSONDecoder[T any](handler func(context.Context, T, *kafka.Message) err
 
 ## Testing
 
-Three tiers: unit (pure logic), mock broker (`kafka.NewMockCluster`, no Docker, skipped under `-short`) and integration (`//go:build integration`, testcontainers + Redpanda, needs Docker). Both `go vet` and lint run with the `integration` tag. Shared helpers are in `testhelpers_test.go` (`skipIfShort`, `newMockCluster`, `uniqueTopic`, `waitFor`, `fastAtLeastOnce`, ...). Runnable documentation lives in `example_test.go`.
+Three tiers: unit (pure logic), mock broker (`ckafka.NewMockCluster`, no Docker, skipped under `-short`) and integration (`//go:build integration`, testcontainers + Redpanda, needs Docker). Both `go vet` and lint run with the `integration` tag. Shared helpers are in `testhelpers_test.go` (`skipIfShort`, `newMockCluster`, `uniqueTopic`, `waitFor`, `fastAtLeastOnce`, ...). Runnable documentation lives in `example_test.go`.
 
 ## Conventions
 
