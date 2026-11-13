@@ -45,7 +45,7 @@ go get github.com/loipv/kafka-go
 
 Requirements:
 
-- Go 1.24 or newer (`go.mod` declares `go 1.24.10`).
+- Go 1.24.10 or newer (the `go` directive in `go.mod`).
 - cgo: build with `CGO_ENABLED=1` and a C toolchain. confluent-kafka-go bundles a statically linked librdkafka for common platforms, so a separate librdkafka install is normally not needed.
 
 ## Project structure
@@ -108,6 +108,7 @@ import (
 	"log"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/loipv/kafka-go/kafka"
 )
@@ -133,7 +134,9 @@ func main() {
 	if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("start: %v", err)
 	}
-	if err := consumer.Close(context.Background()); err != nil {
+	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := consumer.Close(closeCtx); err != nil {
 		log.Printf("close: %v", err)
 	}
 }
@@ -161,7 +164,9 @@ consumer.OnBatch(func(ctx context.Context, msgs []*kafka.Message) error {
 if err := consumer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 	log.Printf("start: %v", err)
 }
-if err := consumer.Close(context.Background()); err != nil {
+closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := consumer.Close(closeCtx); err != nil {
 	log.Printf("close: %v", err)
 }
 ```
@@ -263,7 +268,7 @@ consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) e
 `Close` is still required after `Start` returns, whatever the reason: `Start` does not release the client or flush the last partial batch. Shut down in this order:
 
 1. Cancel the context passed to `Start` (the signal handler in the quick start does this) and wait for `Start` to return.
-2. Call `Close(ctx)`. It waits up to 5 seconds for the poll loop to leave, flushes the batch still in memory (batch modes), closes the DLQ producer and the idempotency store, and closes the client. `ctx` bounds only that final flush, so give it a deadline and do not pass an already-cancelled context.
+2. Call `Close(ctx)`. It waits up to 5 seconds for the poll loop to leave, flushes the batch still in memory (batch modes), closes the DLQ producer and the idempotency store, and closes the client. `ctx` bounds only that final flush, so give it a deadline (create the context just before calling `Close`, as the quick start does) and do not pass an already-cancelled context.
 
 If `Close` is called while a long retry is still in flight and the `Start` context was not cancelled, `Close` falls back to its 5-second wait and may close the client under that retry. `Close` is safe to call more than once; later calls return `nil`.
 
@@ -318,7 +323,8 @@ consumer, err := kafka.NewConsumer(
 if err != nil {
 	log.Fatal(err)
 }
-defer consumer.Close(context.Background())
+// Register a handler, then Start and Close as in the quick start.
+_ = consumer
 ```
 
 `ConsumerWithPartitionAssignor` selects the assignment strategy: `AssignorRange` (default), `AssignorRoundRobin` or `AssignorCooperativeSticky`. All members of a group should use the same one.
@@ -341,7 +347,7 @@ Stored offsets are committed by auto commit (the default) or by `Commit`. With a
 
 ### What blocks a partition
 
-When a failed message is not claimed by the error handler and is not confirmed on the DLQ (there is no DLQ, or the DLQ produce failed), it cannot be parked, and its partition is blocked: the library pauses the partition, seeks back to the failed message, and retries after a wait. The first wait is `RetryConfig.InitialInterval`; it doubles on each consecutive block of the same message up to `RetryConfig.MaxInterval` (defaults 1s and 30s), and resets when the message finally parks. The wait is tracked in the poll loop, which never sleeps, so other partitions keep flowing and `max.poll.interval.ms` is not exceeded. A revoked partition drops its blocked state. `Consumer.Metrics().BlockedPartitions` lists the blocked partitions.
+When a failed message is not claimed by the error handler and is not confirmed on the DLQ (there is no DLQ, or the DLQ produce failed), it cannot be parked, and its partition is blocked: the library pauses the partition, seeks back to the failed message, and retries after a wait. The first wait is `RetryConfig.InitialInterval`; it doubles on each consecutive block of the same message up to `RetryConfig.MaxInterval` (defaults 1s and 30s), and resets when the message finally parks. The wait between redeliveries of a blocked partition does not hold up the poll loop: other partitions keep flowing while it runs, and `max.poll.interval.ms` is not exceeded by it. (Handler retries and the DLQ delivery wait are different; see [Handler retries](#handler-retries).) A revoked partition drops its blocked state. `Consumer.Metrics().BlockedPartitions` lists the blocked partitions.
 
 In batch modes the whole batch fails together: if any message of the batch cannot be parked, nothing is stored and the batch is redelivered wholesale. Use [idempotency](#idempotency) or an idempotent handler for the duplicates this causes.
 
@@ -358,6 +364,8 @@ In batch modes the whole batch fails together: if any message of the batch canno
 | `SkipOnMaxRetries` | false | Drop a message after its retries are exhausted instead of blocking. |
 
 Retries apply to single-message handlers only. A batch handler is not retried in place: a failed batch goes straight to the error handler and the DLQ, or blocks and is redelivered whole. For a batch handler only `InitialInterval` and `MaxInterval` are used, as the partition-block wait.
+
+Retry waits run on the poll loop. While a message is being retried, no partition of this consumer is consumed, and the same holds while a message waits for its DLQ confirmation. With the defaults the retry waits add up to about 7 seconds (1s + 2s + 4s), and the DLQ wait is bounded by 30 seconds, so one failing message can hold up the whole consumer for up to about 37 seconds. With `MaxRetries: 10` and `MaxInterval: 30s` the retry waits alone add up to about 3 minutes (1s, 2s, 4s, 8s, 16s, then 30s for the remaining five) per message. This is why `max.poll.interval.ms` is derived from these waits (see [below](#maxpollintervalms)). Keep the retry budget small, and prefer the DLQ over long retries.
 
 When a single-message handler has failed all its attempts, the message goes to the error handler (if set; `nil` claims it), then to the DLQ (if set; a confirmed produce parks it), and otherwise blocks its partition.
 
@@ -379,7 +387,8 @@ consumer, err := kafka.NewConsumer(
 if err != nil {
 	log.Fatal(err)
 }
-defer consumer.Close(context.Background())
+// Register a handler, then Start and Close as in the quick start.
+_ = consumer
 ```
 
 The error handler is called once per message that failed: in batch modes, once for each message of a failed batch. Note that `err` can carry text derived from message content; see [Security](#security).
@@ -398,7 +407,7 @@ The consumer must poll within `max.poll.interval.ms` or the group considers it f
 
 - `ConsumerWithRebalanceTimeout` (default 0, meaning unset);
 - 300 seconds;
-- 1.5 × (the sum of the handler retry waits + the DLQ delivery timeout).
+- 1.5 × (the sum of the handler retry waits + the DLQ delivery timeout), because those waits run on the poll loop.
 
 With the defaults the 300-second floor applies. The estimate counts the waits only, not the time your handler runs, so raise `ConsumerWithRebalanceTimeout` if a handler or a batch handler can run longer. `NewConsumer` returns an error when `ConsumerWithSessionTimeout` is not below the resulting value.
 
@@ -417,7 +426,7 @@ How a message reaches the DLQ:
 - The record keeps the original key, value and headers. The partition is chosen by librdkafka from the key.
 - It gets these headers: `x-dlq-original-topic`, `x-dlq-timestamp` (RFC 3339), `x-dlq-handler-retry-count` (the number of times the handler was called: 1 for a batch handler) and, with `IncludeErrorInfo`, `x-dlq-error-message`.
 - The DLQ produce is a single attempt with `acks=all`, confirmed by its delivery report and bounded by the DLQ producer's `message.timeout.ms`: 30 seconds unless `DLQConfig.Raw` (or the consumer's `Raw`, when the DLQ is on the same cluster) sets `message.timeout.ms`. `delivery.timeout.ms` is accepted as an alias.
-- When the produce fails or times out, the message is not parked: its partition blocks and the message is retried later. A broken DLQ therefore stalls only the affected partitions, and nothing is dropped. The one exception is `SkipOnMaxRetries`.
+- When the produce fails or times out, the message is not parked: its partition blocks and the message is retried later. A broken DLQ therefore blocks the partitions of the messages it could not take, and nothing is dropped. Each attempt holds up the poll loop for up to the delivery timeout. The one exception is `SkipOnMaxRetries`.
 - When a batch fails, the messages the error handler did not claim are sent in one pass. If any of them fails, the whole batch blocks.
 - Confirmed sends are counted in `Metrics.SentToDLQ`, keyed by the source topic.
 
@@ -440,7 +449,8 @@ consumer, err := kafka.NewConsumer(
 if err != nil {
 	log.Fatal(err)
 }
-defer consumer.Close(context.Background())
+// Register a handler, then Start and Close as in the quick start.
+_ = consumer
 ```
 
 **Error handler semantics.** `ConsumerWithErrorHandler` runs before the DLQ. Returning `nil` means the handler took ownership: the message is parked and the DLQ is not used. Returning an error defers to the DLQ or, without one, blocks the partition. With `SkipOnMaxRetries` the message is parked whatever it returns.
@@ -462,7 +472,8 @@ consumer, err := kafka.NewConsumer(
 if err != nil {
 	log.Fatal(err)
 }
-defer consumer.Close(context.Background())
+// Register a handler, then Start and Close as in the quick start.
+_ = consumer
 ```
 
 This is a best-effort filter, not exactly-once processing. Its limits:
@@ -527,7 +538,7 @@ Options are applied in order, so a later option overrides an earlier one for the
 
 ### Raw librdkafka config
 
-`ProducerWithRawConfig` and `ConsumerWithRawConfig` merge extra librdkafka keys (for example `linger.ms`, `fetch.min.bytes`). Raw keys are merged into the connection and authentication keys (`bootstrap.servers`, `security.protocol`, `sasl.*`), which they may therefore override. The library then sets its own keys after the merge, and Raw cannot override these:
+`ProducerWithRawConfig` and `ConsumerWithRawConfig` merge extra librdkafka keys (for example `linger.ms`, `fetch.min.bytes`). Raw keys are merged into the connection and authentication keys (`bootstrap.servers`, `client.id` (producer only), `security.protocol`, `sasl.*`), which they may therefore override. The library then sets its own keys after the merge, and Raw cannot override these:
 
 - Producer: `acks`; `request.timeout.ms` and `socket.connection.setup.timeout.ms` while their options are above zero; `compression.type` unless the compression is none; `enable.idempotence` when `ProducerWithIdempotent(true)`.
 - Consumer: `group.id`, `auto.offset.reset`, `enable.auto.commit`, `enable.auto.offset.store` (always false) and `max.poll.interval.ms`; `session.timeout.ms`, `heartbeat.interval.ms`, `auto.commit.interval.ms` and `partition.assignment.strategy` while their options are above zero or non-empty (the default). Setting such an option to zero leaves the key to Raw.
@@ -563,7 +574,8 @@ consumer, err := kafka.NewConsumer(
 if err != nil {
 	log.Fatal(err)
 }
-defer consumer.Close(context.Background())
+// Register a handler, then Start and Close as in the quick start.
+_ = consumer
 ```
 
 The DLQ producer on the same cluster inherits the consumer's SSL, SASL and Raw settings, and `NewHealthChecker` accepts the same `ProducerWith*` connection options. A DLQ on a separate cluster takes its own settings from `DLQConfig`.
@@ -591,7 +603,7 @@ defer producer.Close()
 
 ### What the library logs
 
-The library never logs message keys, values or headers. Two places can still carry message-derived data and are your decision: the `x-dlq-error-message` header (`IncludeErrorInfo`) and the `messaging.kafka.message.key` span attribute (`IncludeMessageKey`), both off by default. Error values returned by your own handlers are logged as they are, so avoid putting payloads in them.
+The library never logs message keys, values or headers. Three places can still carry message-derived data: the `x-dlq-error-message` header (`IncludeErrorInfo`) and the `messaging.kafka.message.key` span attribute (`IncludeMessageKey`), both off by default; and, with tracing on, the text of handler errors, which is recorded on spans. Error values returned by your own handlers are also logged as they are, so avoid putting payloads in them.
 
 ## Observability
 
@@ -674,7 +686,7 @@ defer producer.Close()
 | `CheckTopic(ctx, topic)` | The topic's metadata is present without an error. Details: `topic`, `partitionCount`, `partitions`. |
 | `CheckConsumerLag(ctx, groupID, maxLag)` | The group exists and its total lag (high watermark minus committed offset, summed over partitions) is not above `maxLag`. Details: `groupId`, `state`, `memberCount`, `lag`, `maxLag`, `partitions`. |
 
-Each check returns a `*HealthResult` (never `nil`) with `Status` (`HealthStatusUp` or `HealthStatusDown`), `Details` and `Error`; every failure is reported as DOWN, not as a Go error. The context's deadline bounds each check; without a deadline a 10-second default applies to each broker query. `HealthResult` marshals to JSON.
+Each check returns a `*HealthResult` (never `nil`) with `Status` (`HealthStatusUp` or `HealthStatusDown`), `Details` and `Error`; every failure is reported as DOWN, not as a Go error. The context's deadline bounds each check; without a deadline the metadata and watermark queries get a 10-second default each, while the group describe and offset listing in `CheckConsumerLag` use the admin client's own default timeouts. `HealthResult` marshals to JSON.
 
 ```go
 h, err := kafka.NewHealthChecker(kafka.ProducerWithBrokers("localhost:9092"))
@@ -713,7 +725,7 @@ Sentinel errors are package variables; test for them with `errors.Is`.
 | `ErrDLQClosed` | The error of a DLQ produce attempted after `Close` closed the DLQ producer. The consumer logs it and does not park the message; `Start` does not return it. |
 | `ErrSkippedOnMaxRetries` | Wraps the last handler error passed to the error handler and the DLQ when `SkipOnMaxRetries` drops a message. `Start` does not return it. |
 
-`NewProducer` and `NewConsumer` also return an error when librdkafka rejects the resulting configuration (for example an unsupported compression codec, or a session timeout not below `max.poll.interval.ms`).
+`NewProducer` and `NewConsumer` also return an error when librdkafka rejects the resulting configuration (for example an unsupported compression codec). `NewConsumer` itself rejects a session timeout that is not below the computed `max.poll.interval.ms`.
 
 ## Typed handlers
 
@@ -787,6 +799,7 @@ Make targets (they mirror CI):
 
 - Idempotency is in-process only: it is lost on restart or when a partition moves to another instance.
 - A batch handler is not retried in place; a failed batch is redelivered whole (or sent to the DLQ).
+- Retry waits and the DLQ delivery wait run on the poll loop, so a message being retried or awaiting DLQ confirmation stops consumption of every partition of that consumer.
 - `ProduceAsync` has no back-pressure and no trace span.
 - Produce methods must not run concurrently with `Close`.
 - `CheckConsumerLag` needs the brokers' consumer group admin APIs (describe group, list group offsets) and permission to use them.
