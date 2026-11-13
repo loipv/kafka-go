@@ -695,3 +695,11 @@ func TestNewConsumer_Validation(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkCommitOffsets_Single(b *testing.B) {
+	msgs := []*Message{{Topic: "t", Partition: 0, Offset: 42}}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = commitOffsets(msgs)
+	}
+}
