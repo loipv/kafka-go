@@ -1,6 +1,11 @@
 package kafka
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
 func TestLagForPartition(t *testing.T) {
 	tests := []struct {
@@ -21,4 +26,37 @@ func TestLagForPartition(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQueryTimeoutMs(t *testing.T) {
+	h := &HealthChecker{timeout: 10 * time.Second}
+
+	t.Run("cancelled context returns its error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := h.queryTimeoutMs(ctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	})
+	t.Run("expired deadline returns a deadline error", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		if _, err := h.queryTimeoutMs(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want context.DeadlineExceeded", err)
+		}
+	})
+	t.Run("no deadline uses the health timeout", func(t *testing.T) {
+		ms, err := h.queryTimeoutMs(context.Background())
+		if err != nil || ms != 10000 {
+			t.Errorf("= (%d, %v), want (10000, nil)", ms, err)
+		}
+	})
+	t.Run("shorter deadline clamps the timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ms, err := h.queryTimeoutMs(ctx)
+		if err != nil || ms <= 0 || ms > 2000 {
+			t.Errorf("= (%d, %v), want 0 < ms <= 2000 and nil", ms, err)
+		}
+	})
 }

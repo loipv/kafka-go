@@ -68,6 +68,21 @@ func (h *HealthChecker) deadlineTimeout(ctx context.Context) time.Duration {
 	return timeout
 }
 
+// queryTimeoutMs is how long one broker query may take, in milliseconds. It
+// returns the context's error once ctx is done, and context.DeadlineExceeded
+// when no positive time remains (librdkafka must never get a non-positive
+// timeout).
+func (h *HealthChecker) queryTimeoutMs(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	ms := int(h.deadlineTimeout(ctx).Milliseconds())
+	if ms <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	return ms, nil
+}
+
 // lagForPartition returns consumer lag for one partition: high watermark
 // minus committed offset. A negative committed offset means "nothing
 // committed yet" and a committed offset beyond the watermark means log
@@ -193,13 +208,12 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 			if tp.Offset < 0 || tp.Topic == nil {
 				continue
 			}
-			// Re-clamp per query so the ctx deadline bounds the whole check,
-			// and never hand librdkafka a non-positive timeout.
-			timeoutMs := int(h.deadlineTimeout(ctx).Milliseconds())
-			if timeoutMs <= 0 {
+			// Re-clamp per query so the ctx deadline bounds the whole check.
+			timeoutMs, err := h.queryTimeoutMs(ctx)
+			if err != nil {
 				return &HealthResult{
 					Status: HealthStatusDown,
-					Error:  context.DeadlineExceeded.Error(),
+					Error:  err.Error(),
 					Details: map[string]any{
 						"groupId": groupID,
 					},
