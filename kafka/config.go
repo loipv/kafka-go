@@ -57,9 +57,10 @@ func (cc connConfig) configMap() ckafka.ConfigMap {
 
 // warnPlaintextSASL logs once when the resolved security.protocol sends SASL
 // credentials without TLS. It decides from the resolved map so a Raw override
-// is honoured, and never logs the username or password.
+// is honoured (librdkafka accepts the protocol name in any case), and never
+// logs the username or password.
 func warnPlaintextSASL(l *slog.Logger, cc connConfig) {
-	if cc.configMap()["security.protocol"] != "sasl_plaintext" {
+	if !strings.EqualFold(fmt.Sprint(cc.configMap()["security.protocol"]), "sasl_plaintext") {
 		return
 	}
 	if l == nil {

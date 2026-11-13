@@ -349,6 +349,9 @@ func TestWarnPlaintextSASL(t *testing.T) {
 		{"raw sasl_ssl is silent", connConfig{Brokers: []string{"b"}, SASL: sasl,
 			Raw: map[string]any{"security.protocol": "sasl_ssl"}}, false},
 		{"no sasl is silent", connConfig{Brokers: []string{"b"}}, false},
+		// librdkafka accepts the protocol name in any case.
+		{"raw upper-case SASL_PLAINTEXT warns", connConfig{Brokers: []string{"b"}, SASL: sasl,
+			Raw: map[string]any{"security.protocol": "SASL_PLAINTEXT"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
