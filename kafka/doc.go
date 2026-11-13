@@ -7,9 +7,10 @@
 //   - Handler-based consumer: one active handler, OnMessage, OnBatch or
 //     OnGroupedBatch, and its mode follows it
 //   - At-least-once delivery: an offset is stored only once a message is
-//     parked (processed, confirmed on the DLQ or claimed by the error
-//     handler); an unparkable message blocks its partition with escalating
-//     backoff instead of being dropped
+//     parked (processed, confirmed on the DLQ, claimed by the error handler,
+//     skipped as an idempotency duplicate, or dropped under the explicit
+//     RetryConfig.SkipOnMaxRetries opt-in); any other message blocks its
+//     partition with escalating backoff instead of being skipped
 //   - Dead Letter Queue: a single confirmed produce per message, optionally to
 //     a separate cluster
 //   - In-memory idempotency filter (per process, lost on restart)
