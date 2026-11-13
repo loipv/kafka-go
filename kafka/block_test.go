@@ -437,3 +437,84 @@ func TestBlockedPartition_UserResumeDoesNotBypassBackoff(t *testing.T) {
 	waitFor(t, 15*time.Second, func() bool { return calls.Load() > n },
 		"message never retried after the block's own backoff elapsed")
 }
+
+// TestBlockedPartition_RevokedWhileBlockedIsRedeliveredToNewOwner pins that a
+// partition revoked while blocked hands its blocked message to the next owner:
+// the revoke commits nothing past it, and the new owner receives and parks it.
+func TestBlockedPartition_RevokedWhileBlockedIsRedeliveredToNewOwner(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+	newC := func() *Consumer {
+		c, err := NewConsumer(append(fastAtLeastOnce(),
+			ConsumerWithBrokers(mc.BootstrapServers()),
+			ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+			// Short session: the mock coordinator completes a join only after a
+			// departed member's session expires.
+			ConsumerWithSessionTimeout(6*time.Second), ConsumerWithHeartbeatInterval(2*time.Second))...)
+		if err != nil {
+			t.Fatalf("NewConsumer: %v", err)
+		}
+		return c
+	}
+
+	a := newC()
+	a.OnMessage(func(context.Context, *Message) error { return errors.New("always fails") })
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	go func() { _ = a.Start(ctxA) }()
+	defer a.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+	waitFor(t, 15*time.Second, func() bool { return len(a.Metrics().BlockedPartitions) > 0 },
+		"consumer A never blocked on the failing message")
+
+	// B holds the message in its handler until the test has checked the
+	// committed offset, so "before B handled it" is observable.
+	received := make(chan int64, 4)
+	gate := make(chan struct{})
+	b := newC()
+	b.OnMessage(func(ctx context.Context, m *Message) error {
+		received <- m.Offset
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer b.Close(context.Background())
+	defer cancelB()
+	go func() { _ = b.Start(ctxB) }()
+
+	// Closing A revokes its partitions (if B's join has not already taken it).
+	cancelA()
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatalf("close A: %v", err)
+	}
+
+	select {
+	case off := <-received:
+		if off != 0 {
+			t.Fatalf("B first received offset %d, want 0 (the blocked message)", off)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the blocked message was never redelivered to the new owner")
+	}
+	if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 1 {
+		t.Fatalf("committed offset = %d before B handled the message, want no advance past the blocked message", off)
+	}
+	close(gate)
+	waitFor(t, 15*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) >= 1
+	}, "B never parked the redelivered message")
+}
