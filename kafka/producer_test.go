@@ -1,8 +1,11 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +110,34 @@ func TestProducer_ProduceBatchMessageLargerThanQueueFailsFast(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ProduceBatch did not return within 5s: queue-full retry never terminates")
+	}
+}
+
+// A flush that times out leaves messages undelivered; Close must say so.
+func TestProducer_CloseWarnsWhenFlushTimesOut(t *testing.T) {
+	skipIfShort(t)
+	old := closeFlushTimeout
+	closeFlushTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { closeFlushTimeout = old })
+
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	var buf bytes.Buffer
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	if err := p.ProduceAsync(topic, &Message{Value: []byte("stuck")}); err != nil {
+		t.Fatalf("ProduceAsync: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remaining=1") {
+		t.Errorf("log = %q, want a Warn with remaining=1", got)
 	}
 }

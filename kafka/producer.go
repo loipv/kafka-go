@@ -220,6 +220,10 @@ func (p *Producer) Flush(timeout time.Duration) error {
 	return nil
 }
 
+// closeFlushTimeout bounds the final flush in Close. A variable so tests can
+// shorten it.
+var closeFlushTimeout = 10 * time.Second
+
 // Close flushes outstanding messages and closes the producer. It waits for
 // the delivery-report reader to drain before closing the producer under it.
 func (p *Producer) Close() error {
@@ -231,7 +235,9 @@ func (p *Producer) Close() error {
 	// Flush while the reader goroutine is still consuming Events(): Len()
 	// counts unread delivery reports, so stopping the reader first would
 	// stall Flush for the full timeout and drop async delivery failures.
-	p.producer.Flush(10000)
+	if remaining := p.producer.Flush(int(closeFlushTimeout.Milliseconds())); remaining > 0 {
+		p.logger.Warn("producer closed with undelivered messages", "remaining", remaining)
+	}
 	close(p.done)
 	p.wg.Wait() // let the report reader exit before closing the producer under it (#30)
 	p.producer.Close()
