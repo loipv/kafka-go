@@ -50,6 +50,9 @@ func (s SASLConfig) String() string {
 	return fmt.Sprintf("SASLConfig{Mechanism:%s Username:%s Password:[REDACTED]}", s.Mechanism, s.Username)
 }
 
+// GoString redacts the password for the %#v verb, which bypasses String.
+func (s SASLConfig) GoString() string { return s.String() }
+
 // LogValue implements slog.LogValuer with the password redacted.
 func (s SASLConfig) LogValue() slog.Value {
 	return slog.GroupValue(

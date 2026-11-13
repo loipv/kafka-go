@@ -288,7 +288,8 @@ func TestSASLConfig_RedactsPassword(t *testing.T) {
 	s := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: "s3cret"}
 	var buf bytes.Buffer
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("cfg", "sasl", s)
-	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%v", *s), buf.String()} {
+	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%v", *s),
+		fmt.Sprintf("%#v", s), fmt.Sprintf("%#v", *s), buf.String()} {
 		if strings.Contains(out, "s3cret") || !strings.Contains(out, "[REDACTED]") {
 			t.Errorf("password leaked or not redacted in %q", out)
 		}
