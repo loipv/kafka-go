@@ -111,36 +111,74 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 	deliveryChan := make(chan ckafka.Event, len(msgs))
 	var errs []error
 	pending := 0
-	for _, m := range msgs {
-		if err := p.producer.Produce(m, deliveryChan); err != nil {
-			endSpan(m, err) // no report will ever arrive for this message
-			errs = append(errs, err)
-			continue
-		}
-		pending++
-	}
-	for i := 0; i < pending; i++ {
+	// await consumes one delivery report; it returns false when ctx is done.
+	await := func() bool {
 		select {
 		case e := <-deliveryChan:
-			m, ok := e.(*ckafka.Message)
-			if !ok {
-				continue
+			pending--
+			if err := finishDelivery(e); err != nil {
+				errs = append(errs, err)
 			}
-			if m.TopicPartition.Error != nil {
-				endSpan(m, m.TopicPartition.Error)
-				errs = append(errs, fmt.Errorf("delivery failed for topic %s partition %d: %w",
-					topicOf(m), m.TopicPartition.Partition, m.TopicPartition.Error))
-			} else {
-				endSpan(m, nil)
-			}
+			return true
 		case <-ctx.Done():
-			for _, m := range msgs {
-				endSpan(m, ctx.Err()) // idempotent: already-reported messages skip
+			return false
+		}
+	}
+	abort := func() error {
+		for _, m := range msgs {
+			endSpan(m, ctx.Err()) // idempotent: already-reported messages skip
+		}
+		return errors.Join(append(errs, ctx.Err())...)
+	}
+	for _, m := range msgs {
+		for {
+			err := p.producer.Produce(m, deliveryChan)
+			if err == nil {
+				pending++
+				break
 			}
-			return errors.Join(append(errs, ctx.Err())...)
+			var kerr ckafka.Error
+			if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull {
+				endSpan(m, err) // no report will ever arrive for this message
+				errs = append(errs, err)
+				break
+			}
+			// librdkafka's queue is full: back-pressure by draining one
+			// delivery report (or flushing) and retrying the same message.
+			if ctx.Err() != nil {
+				return abort()
+			}
+			if pending > 0 {
+				if !await() {
+					return abort()
+				}
+			} else {
+				p.producer.Flush(100)
+			}
+		}
+	}
+	for pending > 0 {
+		if !await() {
+			return abort()
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// finishDelivery ends the span for one delivery report and returns the
+// delivery error, if any.
+func finishDelivery(e ckafka.Event) error {
+	m, ok := e.(*ckafka.Message)
+	if !ok {
+		return nil
+	}
+	if err := m.TopicPartition.Error; err != nil {
+		endSpan(m, err)
+		return fmt.Errorf("delivery failed for topic %s partition %d: %w",
+			topicOf(m), m.TopicPartition.Partition, err)
+	}
+	endSpan(m, nil)
+	return nil
 }
 
 func endSpan(m *ckafka.Message, err error) {

@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -52,5 +53,29 @@ func TestProducer_CloseReportsAsyncFailures(t *testing.T) {
 	t.Logf("Close() took %v", time.Since(start))
 	if len(errs) != 1 {
 		t.Fatalf("delivery error handler calls during Close = %d, want 1", len(errs))
+	}
+}
+
+func TestProducer_ProduceBatchLargerThanQueue(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithRawConfig(map[string]any{"queue.buffering.max.messages": 100}))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	msgs := make([]*Message, 1000)
+	for i := range msgs {
+		msgs[i] = &Message{Value: []byte("v")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := p.ProduceBatch(ctx, topic, msgs); err != nil {
+		t.Fatalf("ProduceBatch(1000 msgs, queue 100) = %v, want nil", err)
+	}
+	if got := topicHighWatermark(t, mc.BootstrapServers(), topic); got != 1000 {
+		t.Errorf("high watermark = %d, want 1000", got)
 	}
 }
