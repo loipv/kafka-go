@@ -9,6 +9,35 @@ linters:
     - errorlint
     - copyloopvar
     - nilerr
+  settings:
+    revive:
+      # Listing rules replaces revive's default set, so the defaults stay
+      # listed here next to `exported`, which enforces doc comments on every
+      # exported identifier (revive skips test files for it).
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
   exclusions:
     rules:
       # Test files: `defer x.Close()` and fire-and-forget Start in teardown
