@@ -281,3 +281,38 @@ func offsetReset(fromBeginning bool) string {
 	}
 	return "latest"
 }
+
+// ignoredDLQConnFields lists the DLQConfig connection fields that are set but
+// ignored because Brokers is empty (the DLQ then inherits the consumer's
+// connection; see dlqConn).
+func ignoredDLQConnFields(d *DLQConfig) []string {
+	if d == nil || len(d.Brokers) > 0 {
+		return nil
+	}
+	var fields []string
+	if d.SSL {
+		fields = append(fields, "SSL")
+	}
+	if d.SASL != nil {
+		fields = append(fields, "SASL")
+	}
+	if len(d.Raw) > 0 {
+		fields = append(fields, "Raw")
+	}
+	return fields
+}
+
+// warnIgnoredDLQConn logs one warning naming the DLQ connection fields that
+// are ignored without DLQConfig.Brokers. It names the fields, never their
+// values.
+func warnIgnoredDLQConn(l *slog.Logger, d *DLQConfig) {
+	fields := ignoredDLQConnFields(d)
+	if len(fields) == 0 {
+		return
+	}
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Warn("DLQConfig connection fields are ignored without DLQConfig.Brokers; the DLQ uses the consumer's connection",
+		"fields", strings.Join(fields, ","))
+}

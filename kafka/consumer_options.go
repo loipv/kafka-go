@@ -96,7 +96,8 @@ type DLQConfig struct {
 
 	// Brokers, SSL, SASL and Raw select a separate DLQ cluster. With empty
 	// Brokers (the default) the DLQ producer inherits the consumer's connection
-	// (brokers, SSL, SASL, Raw) and SSL, SASL and Raw here are ignored. Set
+	// (brokers, SSL, SASL, Raw) and SSL, SASL and Raw here are ignored;
+	// NewConsumer logs a warning naming the ignored fields that are set. Set
 	// Brokers and the DLQ producer uses only the SSL, SASL and Raw below —
 	// nothing is inherited, so the consumer's credentials never reach another
 	// cluster.

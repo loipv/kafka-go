@@ -377,3 +377,55 @@ func TestWarnPlaintextSASL_NilLogger(t *testing.T) {
 		t.Errorf("warn records = %d, want 2 (log: %q)", got, buf.String())
 	}
 }
+
+func TestConfig_IgnoredDLQConnFields(t *testing.T) {
+	sasl := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: "p"}
+	tests := []struct {
+		name string
+		dlq  *DLQConfig
+		want []string
+	}{
+		{"no DLQ", nil, nil},
+		{"topic only", &DLQConfig{Topic: "d"}, nil},
+		{"all three without brokers", &DLQConfig{Topic: "d", SSL: true, SASL: sasl, Raw: map[string]any{"x": 1}},
+			[]string{"SSL", "SASL", "Raw"}},
+		{"raw only without brokers", &DLQConfig{Topic: "d", Raw: map[string]any{"x": 1}}, []string{"Raw"}},
+		{"empty raw map is not set", &DLQConfig{Topic: "d", Raw: map[string]any{}}, nil},
+		{"brokers set uses them", &DLQConfig{Topic: "d", Brokers: []string{"b"}, SSL: true, SASL: sasl,
+			Raw: map[string]any{"x": 1}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ignoredDLQConnFields(tt.dlq); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ignoredDLQConnFields() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfig_WarnIgnoredDLQConn(t *testing.T) {
+	const password = "hunter2-secret"
+	var buf bytes.Buffer
+	warnIgnoredDLQConn(slog.New(slog.NewTextHandler(&buf, nil)), &DLQConfig{Topic: "d",
+		SASL: &SASLConfig{Mechanism: "PLAIN", Username: "dlq-user", Password: password},
+		Raw:  map[string]any{"message.timeout.ms": 5000}})
+	out := buf.String()
+	if got := strings.Count(out, "level=WARN"); got != 1 {
+		t.Fatalf("warn records = %d, want 1 (log: %q)", got, out)
+	}
+	if !strings.Contains(out, "SASL") || !strings.Contains(out, "Raw") || !strings.Contains(out, "Brokers") {
+		t.Errorf("warning %q must name the ignored fields (SASL, Raw) and DLQConfig.Brokers", out)
+	}
+	for _, secret := range []string{password, "dlq-user", "5000"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("warning %q must not log field values (found %q)", out, secret)
+		}
+	}
+
+	buf.Reset()
+	warnIgnoredDLQConn(slog.New(slog.NewTextHandler(&buf, nil)), &DLQConfig{Topic: "d"})
+	warnIgnoredDLQConn(slog.New(slog.NewTextHandler(&buf, nil)), nil)
+	if buf.Len() != 0 {
+		t.Errorf("nothing ignored must log nothing, got %q", buf.String())
+	}
+}
