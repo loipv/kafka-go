@@ -416,7 +416,64 @@ func TestConsumer_ClosedConsumerRejectsStartAndCommit(t *testing.T) {
 	if err := c.Commit(); !errors.Is(err, ErrConsumerClosed) {
 		t.Errorf("Commit() after Close = %v, want ErrConsumerClosed", err)
 	}
+	if err := c.Commit(&Message{Topic: "t"}); !errors.Is(err, ErrConsumerClosed) {
+		t.Errorf("Commit(msg) after Close = %v, want ErrConsumerClosed", err)
+	}
 	if err := c.Close(context.Background()); err != nil {
 		t.Errorf("second Close() = %v, want nil", err)
+	}
+}
+
+// A handler that commits manually must still be able to commit while Close
+// flushes the final batch: the handle is alive until Close tears it down.
+func TestConsumer_CommitInsideHandlerDuringClose(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+
+	c, err := NewConsumer(
+		ConsumerWithBrokers(mc.BootstrapServers()), ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithFromBeginning(true), ConsumerWithAutoCommit(false),
+		ConsumerWithBatchSize(100), ConsumerWithBatchTimeout(time.Hour), // only Close flushes
+	)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	commitErrs := make(chan error, 1)
+	c.OnBatch(func(_ context.Context, msgs []*Message) error {
+		commitErrs <- c.Commit(msgs...)
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Start(ctx) }()
+
+	if err := p.Produce(ctx, topic, &Message{Value: []byte("v")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+	waitFor(t, 15*time.Second, func() bool {
+		c.batchMu.Lock()
+		defer c.batchMu.Unlock()
+		return len(c.batch) == 1
+	}, "message never reached the pending batch")
+
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-commitErrs:
+		if err != nil {
+			t.Fatalf("Commit inside the handler during Close = %v, want nil", err)
+		}
+	default:
+		t.Fatal("handler was not called by Close's final flush")
+	}
+	if got := committedOffset(t, mc.BootstrapServers(), group, topic, 0); got != 1 {
+		t.Errorf("committed offset = %d, want 1", got)
 	}
 }

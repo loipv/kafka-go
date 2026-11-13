@@ -30,6 +30,7 @@ type Consumer struct {
 	paused       int32 // atomic: 0=running, 1=paused
 	pauseApplied int32 // atomic: pause/resume actually applied to librdkafka
 	closed       int32 // atomic: 0=open, 1=closed
+	handleClosed int32 // atomic: set once the librdkafka handle is about to be destroyed
 
 	// Lifecycle / batch flush
 	done       chan struct{} // closed by Close; stops helper goroutines
@@ -266,6 +267,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 		c.idempotencyStore.close()
 	}
 
+	atomic.StoreInt32(&c.handleClosed, 1)
 	return c.consumer.Close()
 }
 
@@ -691,7 +693,7 @@ const (
 // when messages are parked, not on consumption. Offsets are committed at
 // max(msg.Offset)+1 per (topic, partition).
 func (c *Consumer) Commit(msgs ...*Message) error {
-	if atomic.LoadInt32(&c.closed) == 1 {
+	if atomic.LoadInt32(&c.handleClosed) == 1 {
 		return ErrConsumerClosed
 	}
 	if len(msgs) == 0 {
