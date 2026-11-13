@@ -8,16 +8,28 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// HealthChecker provides health check functionality for Kafka.
-// It owns one long-lived connection (a librdkafka producer handle plus the
-// admin client derived from it) instead of dialing a fresh admin client per
-// check — and that one connection carries SSL/SASL via the connConfig seam.
+// HealthChecker runs health checks against a Kafka cluster: broker
+// reachability (Check), topic availability (CheckTopic) and consumer group lag
+// (CheckConsumerLag). It owns one long-lived connection (a librdkafka producer
+// handle plus the admin client derived from it) instead of dialing a fresh
+// admin client per check — and that one connection carries SSL/SASL via the
+// connConfig seam. Create one with NewHealthChecker and release it with Close.
+//
+// The context's deadline bounds each check; without a deadline a 10-second
+// default applies to each broker query. A context that is already cancelled
+// makes the check report HealthStatusDown. The checks never return a nil
+// result; every failure is reported as a DOWN HealthResult.
 type HealthChecker struct {
 	producer *ckafka.Producer
 	admin    *ckafka.AdminClient
 }
 
-// NewHealthChecker creates a health checker that owns its producer.
+// NewHealthChecker creates a health checker that owns its connection. It takes
+// the ProducerOptions that describe the connection: ProducerWithBrokers
+// (required, else ErrBrokersRequired), ProducerWithClientID, ProducerWithSSL,
+// ProducerWithSASL, ProducerWithRawConfig, the two timeouts and
+// ProducerWithLogger, with the same defaults as NewProducer. Options that only
+// shape produced messages have no effect on a health checker.
 func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	cfg := newDefaultProducerConfig()
 	for _, opt := range opts {
@@ -43,7 +55,8 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	}, nil
 }
 
-// Close releases the health checker's resources.
+// Close releases the health checker's connection. The checker must not be used
+// afterwards, and Close must not be called while a check is running.
 func (h *HealthChecker) Close() error {
 	h.admin.Close() // no-op for handles derived from a producer
 	h.producer.Close()
@@ -91,7 +104,13 @@ func lagForPartition(high, committed int64) int64 {
 	return 0
 }
 
-// Check performs a basic health check
+// Check reports whether the cluster is reachable: it fetches cluster metadata
+// and is UP when at least one broker answered. When UP, Details holds
+// "brokers" (the number of brokers), "topics" (the number of topics in the
+// metadata) and "originatingId" (the id of the broker that answered). When
+// DOWN, Error says why (a metadata failure, a cancelled context, or no brokers
+// available). The context's deadline bounds the metadata request; the
+// 10-second default applies without one.
 func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	// Check if context is already cancelled
 	select {
@@ -129,7 +148,21 @@ func (h *HealthChecker) Check(ctx context.Context) *HealthResult {
 	}
 }
 
-// CheckConsumerLag checks consumer lag for a specific consumer group
+// CheckConsumerLag reports whether the consumer group groupID has fallen
+// behind. Total lag is the sum over partitions of high watermark minus
+// committed offset; partitions with no committed offset count as zero. The
+// result is DOWN when the total lag exceeds maxLag, when the group does not
+// exist (Error "consumer group not found"), or when a broker query fails or
+// the context ends. The context's deadline bounds the whole check; without a
+// deadline each watermark query gets the 10-second default (the group describe
+// and offset listing then use the admin client's own default timeouts).
+//
+// Details holds "groupId", "state" (the group state), "memberCount", "lag" (the
+// total), "maxLag" and "partitions", a list of maps with "topic", "partition",
+// "committed", "high" and "lag" for every partition with a committed offset.
+// DOWN results from a failed query carry only "groupId" (plus "topic" and
+// "partition" for a failed watermark query) and Error; a DOWN caused by lag has
+// an empty Error and the full Details.
 func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, maxLag int64) *HealthResult {
 	// Check if context is already cancelled
 	select {
@@ -256,7 +289,14 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 	}
 }
 
-// CheckTopic checks if a topic exists and is accessible
+// CheckTopic reports whether topic exists and is usable: it is UP when the
+// topic's metadata is present without an error. When UP, Details holds "topic",
+// "partitionCount" and "partitions", a list of maps with "id", "leader" (the
+// leader broker id), "replicas" (the replica count) and "isrs" (the in-sync
+// replica count) for each partition. When DOWN (metadata failure, unknown topic
+// or topic error), Error says why and Details holds "topic". The context's
+// deadline bounds the metadata request; the 10-second default applies without
+// one.
 func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthResult {
 	// Check if context is already cancelled
 	select {

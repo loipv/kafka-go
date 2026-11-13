@@ -72,10 +72,13 @@ func warnPlaintextSASL(l *slog.Logger, cc connConfig) {
 	l.Warn(msg, "mechanism", cc.SASL.Mechanism)
 }
 
+// conn is the producer's connection/auth configuration.
 func (c *ProducerConfig) conn() connConfig {
 	return connConfig{Brokers: c.Brokers, ClientID: c.ClientID, SSL: c.SSL, SASL: c.SASL, Raw: c.Raw}
 }
 
+// conn is the consumer's connection/auth configuration. It has no ClientID:
+// the consumer does not set client.id.
 func (c *ConsumerConfig) conn() connConfig {
 	return connConfig{Brokers: c.Brokers, SSL: c.SSL, SASL: c.SASL, Raw: c.Raw}
 }
@@ -100,8 +103,9 @@ func timeoutRaw(raw map[string]any) any {
 }
 
 // dlqTimeout is how long one DLQ delivery can block the poll loop: 0 without a
-// DLQ, otherwise the DLQ connection's message.timeout.ms or its alias delivery.timeout.ms (int or numeric
-// string, as librdkafka accepts both) or dlqDeliveryTimeout.
+// DLQ, otherwise the DLQ connection's message.timeout.ms or its alias
+// delivery.timeout.ms (int or numeric string, as librdkafka accepts both) or
+// dlqDeliveryTimeout.
 func (c *ConsumerConfig) dlqTimeout() time.Duration {
 	if c.DLQ == nil {
 		return 0
@@ -119,6 +123,9 @@ func (c *ConsumerConfig) dlqTimeout() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// buildProducerConfig returns the librdkafka config for a producer: the shared
+// connection/auth keys (Raw merged in), then the keys the library owns, which
+// Raw cannot override (see ProducerWithRawConfig).
 func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	cm := c.conn().configMap()
 	cm["acks"] = int(c.Acks)
@@ -137,6 +144,10 @@ func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	return cm
 }
 
+// buildConsumerConfig returns the librdkafka config for a consumer: the shared
+// connection/auth keys (Raw merged in), then the keys the library owns, which
+// Raw cannot override (see ConsumerWithRawConfig). It fails when
+// session.timeout.ms is not below the computed max.poll.interval.ms.
 func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	cm := c.conn().configMap()
 	cm["group.id"] = c.GroupID
@@ -187,15 +198,28 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	return cm, nil
 }
 
-// SASLConfig holds SASL authentication configuration
+// SASLConfig holds SASL authentication credentials. Pass it to
+// ProducerWithSASL or ConsumerWithSASL (or the DLQConfig.SASL field). The
+// password is redacted by String, GoString and LogValue, so printing or logging
+// a SASLConfig, or a config holding one, does not leak it.
+//
+// SASL without SSL sends the credentials unencrypted (security.protocol
+// sasl_plaintext); NewProducer, NewConsumer and NewHealthChecker log a warning
+// in that case, never including the username or password.
 type SASLConfig struct {
+	// Mechanism is the librdkafka sasl.mechanism, for example "PLAIN",
+	// "SCRAM-SHA-256" or "SCRAM-SHA-512".
 	Mechanism string
-	Username  string
-	Password  string
+	// Username is the SASL user name (sasl.username).
+	Username string
+	// Password is the SASL password (sasl.password). It is redacted when the
+	// SASLConfig is printed or logged.
+	Password string
 }
 
-// String redacts the password so printing a SASLConfig (or a config that
-// holds one) never leaks it. Value receiver: covers SASLConfig and *SASLConfig.
+// String returns the config with the password redacted, so printing a
+// SASLConfig (or a config that holds one) never leaks it. Value receiver:
+// covers SASLConfig and *SASLConfig.
 func (s SASLConfig) String() string {
 	return fmt.Sprintf("SASLConfig{Mechanism:%s Username:%s Password:[REDACTED]}", s.Mechanism, s.Username)
 }
@@ -212,10 +236,19 @@ func (s SASLConfig) LogValue() slog.Value {
 	)
 }
 
-// TracingConfig holds OpenTelemetry tracing configuration
+// TracingConfig holds OpenTelemetry tracing configuration. Pass it to
+// ProducerWithTracing or ConsumerWithTracing. Spans are created from the
+// global OpenTelemetry tracer provider and the trace context travels in the
+// message headers (the global propagator, W3C Trace Context when none is set).
 type TracingConfig struct {
-	Enabled       bool
-	TracerName    string
+	// Enabled turns tracing on. The default (false) disables it even when a
+	// TracingConfig is passed.
+	Enabled bool
+	// TracerName is the instrumentation name of the tracer. When empty it is
+	// "github.com/loipv/kafka-go".
+	TracerName string
+	// TracerVersion is the instrumentation version of the tracer. When empty it
+	// is Version.
 	TracerVersion string
 
 	// IncludeMessageKey records the message key as the
@@ -224,6 +257,8 @@ type TracingConfig struct {
 	IncludeMessageKey bool
 }
 
+// offsetReset maps ConsumerWithFromBeginning to librdkafka's auto.offset.reset
+// value: "earliest" when fromBeginning is true, otherwise "latest".
 func offsetReset(fromBeginning bool) string {
 	if fromBeginning {
 		return "earliest"

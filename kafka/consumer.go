@@ -12,7 +12,17 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// Consumer is a handler-based Kafka consumer.
+// Consumer is a handler-based Kafka consumer with at-least-once delivery.
+// Create one with NewConsumer, register exactly one handler (OnMessage,
+// OnBatch or OnGroupedBatch), run it with Start and release it with Close.
+//
+// An offset is stored only when a message is parked: the handler succeeded, the
+// message was confirmed on the DLQ, the error handler claimed it, or
+// SkipOnMaxRetries dropped it. A message that cannot be parked blocks its
+// partition (paused, retried with an escalating wait) instead of being skipped.
+// All handlers are called from the single goroutine running Start. Pause,
+// Resume, Metrics and Commit may be called from any goroutine; the On*
+// registrations are not synchronised and must happen before Start.
 type Consumer struct {
 	consumer *ckafka.Consumer
 	config   *ConsumerConfig
@@ -61,7 +71,13 @@ type Consumer struct {
 	blocked map[TopicPartition]blockState
 }
 
-// NewConsumer creates a new Kafka consumer
+// NewConsumer creates a Consumer from the given options on top of the defaults
+// documented on each ConsumerWith* option. It validates the configuration and
+// returns ErrBrokersRequired, ErrGroupIDRequired, ErrTopicsRequired,
+// ErrDLQTopicRequired, ErrInvalidBatchSize or ErrInvalidBatchTimeout for the
+// corresponding problem, or an error when the librdkafka configuration is
+// rejected (including a session timeout not below max.poll.interval.ms). It
+// does not connect or subscribe; that happens in Start.
 func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	config := newDefaultConsumerConfig()
 	for _, opt := range opts {
@@ -149,21 +165,33 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	return c, nil
 }
 
-// OnMessage registers a handler for single messages. Only one handler is
-// kept: a later On* registration replaces the earlier one.
+// OnMessage registers a handler for single messages, called once per message.
+// Only one handler is active: a later OnMessage, OnBatch or OnGroupedBatch call
+// replaces the earlier one. Register before Start; Start returns ErrNoHandler
+// otherwise. When the handler returns an error it is retried as described on
+// RetryConfig, then offered to the error handler and the DLQ, and finally
+// blocks its partition.
 func (c *Consumer) OnMessage(handler MessageHandler) {
 	c.messageHandler, c.batchHandler, c.groupedBatchHandler = handler, nil, nil
 }
 
-// OnBatch registers a handler for batch messages and turns batch mode on.
-// Only one handler is kept: a later On* registration replaces the earlier one.
+// OnBatch registers a handler for batches of messages and turns batch mode on.
+// A batch is flushed when it reaches ConsumerWithBatchSize messages, after
+// ConsumerWithBatchTimeout, and in Close. Only one handler is active: a later
+// OnMessage, OnBatch or OnGroupedBatch call replaces the earlier one. Register
+// before Start; Start returns ErrNoHandler otherwise. The handler runs once per
+// delivery, without in-place retries; if it returns an error the whole batch
+// is treated as failed and, unless the error handler or the DLQ takes every
+// message, the batch is redelivered, so handlers must tolerate duplicates (see
+// ConsumerWithIdempotencyKey).
 func (c *Consumer) OnBatch(handler BatchHandler) {
 	c.messageHandler, c.batchHandler, c.groupedBatchHandler = nil, handler, nil
 }
 
-// OnGroupedBatch registers a handler for key-grouped batches and turns batch
-// mode on. Only one handler is kept: a later On* registration replaces the
-// earlier one.
+// OnGroupedBatch registers a handler for batches grouped by message key and
+// turns batch mode on. Batching, replacement, registration and failure rules are
+// those of OnBatch; the messages of a batch are grouped by string(Key) in
+// first-seen order, keeping the order within each group.
 func (c *Consumer) OnGroupedBatch(handler GroupedBatchHandler) {
 	c.messageHandler, c.batchHandler, c.groupedBatchHandler = nil, nil, handler
 }
@@ -180,8 +208,15 @@ func isFatalClientError(err error) bool {
 	return errors.As(err, &ke) && ke.IsFatal()
 }
 
-// Start starts consuming messages (blocking). It returns on context
-// cancellation, on Close, or on a fatal client error.
+// Start subscribes to the configured topics and consumes messages until it is
+// stopped; it blocks. It returns the context's error when ctx is cancelled, nil
+// when Close was called, and an error wrapping the client error when
+// librdkafka reports a fatal one. It returns ErrNoHandler without a registered
+// handler, ErrConsumerClosed after Close, ErrConsumerRunning when Start is
+// already running, and an error when the subscription fails.
+//
+// Whichever way Start returns, call Close afterwards, including after a fatal
+// error: Start does not release the client or flush the last partial batch.
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler
@@ -257,10 +292,18 @@ func (c *Consumer) Start(ctx context.Context) error {
 	}
 }
 
-// Close closes the consumer. Cancel the Start context before calling Close
-// when handlers or retries can exceed the internal wait: without a cancel,
-// Close falls back to a bounded 5s wait for the consume loop and may then
-// close the handle while a long retry is still in flight.
+// Close stops the consumer and releases its resources. It signals Start to
+// return and waits up to 5 seconds for the consume loop to leave, then (in
+// batch mode) flushes the batch still in memory, closes the DLQ producer and
+// the idempotency store, and closes the client.
+//
+// ctx bounds only that final batch flush: it is the context passed to the batch
+// handler and the DLQ for the remaining messages, so a cancelled ctx cuts the
+// flush short. Cancel the Start context before calling Close when handlers or
+// retries can run long: without a cancel, Close falls back to the bounded 5s
+// wait and may then close the handle while a long retry is still in flight.
+//
+// Close is safe to call more than once; later calls return nil and do nothing.
 func (c *Consumer) Close(ctx context.Context) error {
 	wasRunning := c.running.Load()
 	// Use atomic CAS to ensure only one Close can succeed
@@ -304,12 +347,17 @@ func (c *Consumer) Close(ctx context.Context) error {
 	return c.consumer.Close()
 }
 
-// Pause pauses consumption
+// Pause stops fetching new messages from the assigned partitions. The change is
+// applied by the poll loop, which keeps polling, so the consumer stays in its
+// group, a partial batch is still flushed on its timeout, and blocked
+// partitions are not resumed until Resume. It also survives rebalances. Calling
+// it before Start takes effect once partitions are assigned.
 func (c *Consumer) Pause() {
 	c.paused.Store(true)
 }
 
-// Resume resumes consumption
+// Resume undoes Pause: fetching restarts on the assigned partitions and
+// blocked partitions whose wait has elapsed resume.
 func (c *Consumer) Resume() {
 	c.paused.Store(false)
 }
@@ -339,7 +387,10 @@ func (c *Consumer) reconcilePause() {
 	}
 }
 
-// Metrics returns a snapshot of the consumer's handler-failure and DLQ counters.
+// Metrics returns a snapshot of the consumer's handler-failure and DLQ counters
+// and of its blocked partitions. The returned value is a copy that does not
+// change later; call Metrics again for fresh numbers. See Metrics (the type) for
+// what each counter counts.
 func (c *Consumer) Metrics() *Metrics {
 	return c.metrics.snapshot()
 }
@@ -717,11 +768,17 @@ func ignoreNoOffset(err error) error {
 	return err
 }
 
-// Commit stores and commits offsets for the given messages. With no
-// arguments it commits everything stored so far (nil when there is nothing to
-// commit) — offsets are stored only when messages are parked, not on
-// consumption. Offsets are committed at max(msg.Offset)+1 per (topic,
-// partition).
+// Commit commits offsets synchronously. With messages, it stores and commits
+// the offset after the highest-offset message per topic and partition (the
+// position of the next message to read) and returns the first error from the
+// store or the commit. Messages must come from this consumer. With no
+// arguments it commits every offset stored so far, which are the offsets of
+// messages already parked, and returns nil when there is nothing to commit.
+//
+// With ConsumerWithAutoCommit(false) the handler must call Commit itself,
+// otherwise nothing is committed. With auto commit on it is optional, for
+// committing sooner than the auto commit interval. It returns ErrConsumerClosed
+// once the consumer has been closed.
 func (c *Consumer) Commit(msgs ...*Message) error {
 	if c.handleClosed.Load() {
 		return ErrConsumerClosed

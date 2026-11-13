@@ -191,6 +191,7 @@ type kafkaHeaderCarrier struct {
 	msg *ckafka.Message
 }
 
+// Get returns the value of the first header named key, or "".
 func (c *kafkaHeaderCarrier) Get(key string) string {
 	for _, h := range c.msg.Headers {
 		if h.Key == key {
@@ -200,6 +201,7 @@ func (c *kafkaHeaderCarrier) Get(key string) string {
 	return ""
 }
 
+// Set updates the header named key in place, or appends it.
 func (c *kafkaHeaderCarrier) Set(key, val string) {
 	// Try to update existing header in-place (avoid allocation)
 	for i := range c.msg.Headers {
@@ -215,6 +217,7 @@ func (c *kafkaHeaderCarrier) Set(key, val string) {
 	})
 }
 
+// Keys returns every header key.
 func (c *kafkaHeaderCarrier) Keys() []string {
 	keys := make([]string, 0, len(c.msg.Headers))
 	for _, h := range c.msg.Headers {
@@ -228,6 +231,7 @@ type messageHeaderCarrier struct {
 	msg *Message
 }
 
+// Get returns the value of the header named key, or "".
 func (c *messageHeaderCarrier) Get(key string) string {
 	if c.msg.Headers == nil {
 		return ""
@@ -238,6 +242,7 @@ func (c *messageHeaderCarrier) Get(key string) string {
 	return ""
 }
 
+// Set sets the header named key, allocating the map when needed.
 func (c *messageHeaderCarrier) Set(key, val string) {
 	if c.msg.Headers == nil {
 		c.msg.Headers = make(Headers)
@@ -245,6 +250,7 @@ func (c *messageHeaderCarrier) Set(key, val string) {
 	c.msg.Headers[key] = []byte(val)
 }
 
+// Keys returns every header key, in no particular order.
 func (c *messageHeaderCarrier) Keys() []string {
 	if c.msg.Headers == nil {
 		return nil

@@ -12,7 +12,13 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// Producer is a high-performance Kafka producer.
+// Producer is a Kafka producer built on a librdkafka producer handle. Create
+// one with NewProducer and release it with Close.
+//
+// Produce, ProduceBatch, ProduceAsync and Flush are safe for concurrent use by
+// multiple goroutines. Close must not run concurrently with them: stop the
+// producing goroutines first, otherwise a produce call can race the teardown
+// of the underlying handle.
 type Producer struct {
 	producer *ckafka.Producer
 	config   *ProducerConfig
@@ -25,7 +31,13 @@ type Producer struct {
 	deliveryErr func(*Message, error)
 }
 
-// NewProducer creates a new Kafka producer
+// NewProducer creates a Producer from the given options on top of the
+// defaults documented on each ProducerWith* option. It returns
+// ErrBrokersRequired when no broker is configured, and an error wrapping
+// librdkafka's when the resulting configuration is rejected (for example an
+// unsupported compression codec or a conflicting raw key). It does not wait for
+// a broker connection: unreachable brokers surface as delivery errors on the
+// first produce.
 func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	config := newDefaultProducerConfig()
 	for _, opt := range opts {
@@ -72,12 +84,30 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 	return p, nil
 }
 
-// Produce sends a single message to a topic and waits for its delivery report.
+// Produce sends a single message to topic and blocks until its delivery report
+// arrives, returning the delivery error if the broker did not acknowledge it.
+// The message's Partition, Offset and Topic fields are ignored; the partition
+// is chosen by librdkafka from the key.
+//
+// When librdkafka's local queue is full, Produce applies back-pressure: it
+// waits for in-flight delivery reports to drain the queue and retries. A
+// message that can never fit (for example one larger than
+// queue.buffering.max.kbytes) fails with a queue-full error instead of waiting
+// forever. If ctx is done before the report arrives, Produce returns the
+// context's error; the message may still be delivered afterwards. Calling it
+// after Close returns ErrProducerClosed. It must not be called concurrently
+// with Close.
 func (p *Producer) Produce(ctx context.Context, topic string, msg *Message) error {
 	return p.produceAndAwait(ctx, []*ckafka.Message{p.prepareMessage(ctx, topic, msg)})
 }
 
-// ProduceBatch sends multiple messages to one topic and waits for all reports.
+// ProduceBatch sends msgs to topic and blocks until every delivery report has
+// arrived. It returns nil for an empty batch. Failures are collected rather than
+// stopping at the first one: the result is the errors.Join of every message
+// that failed (use errors.Is / errors.As on it), or nil when all were
+// acknowledged. Messages that did not fail may still have been delivered.
+// Back-pressure, ctx handling and the ErrProducerClosed rule are the same as
+// for Produce, and it must not be called concurrently with Close.
 func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {
 	if len(msgs) == 0 {
 		return nil
@@ -102,6 +132,9 @@ func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Messag
 	return km
 }
 
+// produceAndAwait queues msgs on librdkafka, retrying a full queue by draining
+// delivery reports, and returns once every queued message has reported (or
+// ctx is done). The errors.Join of all failures is the result.
 func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
 	if p.closed.Load() {
 		err := ErrProducerClosed
@@ -186,6 +219,8 @@ func finishDelivery(e ckafka.Event) error {
 	return nil
 }
 
+// endSpan ends the producer span stashed in m.Opaque, at most once, recording
+// err on it (nil for success).
 func endSpan(m *ckafka.Message, err error) {
 	if end, ok := m.Opaque.(func(error)); ok {
 		end(err)
@@ -193,6 +228,7 @@ func endSpan(m *ckafka.Message, err error) {
 	}
 }
 
+// topicOf returns the message's topic, or "" when it has none.
 func topicOf(m *ckafka.Message) string {
 	if m.TopicPartition.Topic == nil {
 		return ""
@@ -200,10 +236,18 @@ func topicOf(m *ckafka.Message) string {
 	return *m.TopicPartition.Topic
 }
 
-// ProduceAsync queues a message on librdkafka's internal queue and returns
-// immediately; librdkafka batches (linger.ms / batch.num.messages) and
-// back-pressures naturally when its queue is full. Delivery failures go to
-// the DeliveryErrorHandler.
+// ProduceAsync queues msg on librdkafka's internal queue and returns
+// immediately, without waiting for a delivery report; librdkafka batches the
+// queued messages (linger.ms / batch.num.messages). A successful return only
+// means the message was queued. Delivery failures reported later go to the
+// handler set with ProducerWithDeliveryErrorHandler, or are logged when there
+// is none.
+//
+// There is no back-pressure: when the local queue is full, ProduceAsync returns
+// the queue-full error immediately and the caller decides whether to retry.
+// Unlike Produce it does not start a trace span or inject trace context.
+// Calling it after Close returns ErrProducerClosed, and it must not be called
+// concurrently with Close.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 	if p.closed.Load() {
 		return ErrProducerClosed
@@ -211,7 +255,9 @@ func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 	return p.producer.Produce(p.buildKafkaMessage(topic, msg), nil)
 }
 
-// Flush waits for all queued messages to be sent
+// Flush waits up to timeout for every queued message (including ProduceAsync
+// ones) to be delivered. It returns an error stating how many messages are
+// still queued when the timeout expires, and nil when the queue drained.
 func (p *Producer) Flush(timeout time.Duration) error {
 	remaining := p.producer.Flush(int(timeout.Milliseconds()))
 	if remaining > 0 {
@@ -224,8 +270,13 @@ func (p *Producer) Flush(timeout time.Duration) error {
 // shorten it.
 var closeFlushTimeout = 10 * time.Second
 
-// Close flushes outstanding messages and closes the producer. It waits for
-// the delivery-report reader to drain before closing the producer under it.
+// Close flushes outstanding messages and closes the producer. The flush waits
+// up to 10 seconds; if messages are still undelivered after that, Close logs a
+// warning with the number left behind and closes anyway, so those messages are
+// lost. It waits for the delivery-report goroutine to exit before releasing the
+// librdkafka handle, and always returns nil. Close is safe to call more than
+// once (later calls do nothing), but it must not be called concurrently with
+// Produce, ProduceBatch or ProduceAsync.
 func (p *Producer) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
 	if !p.closed.CompareAndSwap(false, true) {

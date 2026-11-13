@@ -130,6 +130,8 @@ func (c *Consumer) clearBlockedOnPark(msg *Message) {
 	}
 }
 
+// blockedSnapshot returns the currently blocked partitions, in no particular
+// order. Offset is left zero.
 func (c *Consumer) blockedSnapshot() []TopicPartition {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()

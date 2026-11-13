@@ -5,23 +5,37 @@ import (
 	"time"
 )
 
-// Headers is a map of header key-value pairs
+// Headers maps header keys to values. A Kafka message may carry the same header
+// key more than once; on consume the last occurrence wins, and on produce each
+// key is sent once, in no particular order.
 type Headers map[string][]byte
 
-// Message represents a Kafka message
+// Message is a Kafka message, used both for producing and for consuming.
 type Message struct {
-	Key     []byte
-	Value   []byte
+	// Key is the message key. It selects the partition when producing. May be
+	// nil.
+	Key []byte
+	// Value is the message payload. May be nil.
+	Value []byte
+	// Headers are the message headers. Nil when a consumed message has none.
 	Headers Headers
 	// Partition and Offset are only populated on the consume side; they are
 	// ignored when producing.
 	Partition int32
 	Offset    int64
+	// Timestamp is the message timestamp. When producing, the zero value lets
+	// librdkafka use the current time. When consuming, it is the timestamp the
+	// broker or producer recorded.
 	Timestamp time.Time
-	Topic     string
+	// Topic is the source topic on the consume side. It is ignored when
+	// producing: the topic argument of Produce, ProduceBatch and ProduceAsync
+	// decides.
+	Topic string
 }
 
-// SetHeader sets a header, lazily allocating the map. Safe on zero Messages.
+// SetHeader sets the header key to value, replacing any existing value for the
+// key and allocating the Headers map when it is nil, so it is safe on a zero
+// Message.
 func (m *Message) SetHeader(key string, value []byte) {
 	if m.Headers == nil {
 		m.Headers = make(Headers, 1)
@@ -29,87 +43,123 @@ func (m *Message) SetHeader(key string, value []byte) {
 	m.Headers[key] = value
 }
 
-// GroupedBatch represents messages grouped by key
+// GroupedBatch is the messages of one batch that share a key, as passed to an
+// OnGroupedBatch handler.
 type GroupedBatch struct {
-	Key      string
+	// Key is the message key shared by the group, converted to a string. Messages
+	// without a key form one group with the empty Key.
+	Key string
+	// Messages are the group's messages in the order they were received.
 	Messages []*Message
 }
 
-// Acks configuration for producer acknowledgment
+// Acks is the number of broker acknowledgments a produced message needs before
+// it counts as delivered (librdkafka's acks). The values match librdkafka's.
 type Acks int
 
 const (
-	// AcksNone - No acknowledgment
+	// AcksNone does not wait for any acknowledgment: a message counts as
+	// delivered once it is sent, and may be lost without an error.
 	AcksNone Acks = 0
-	// AcksLeader - Leader acknowledgment only
+	// AcksLeader waits for the partition leader only; a message can still be
+	// lost if the leader fails before replicating it.
 	AcksLeader Acks = 1
-	// AcksAll - All replicas acknowledgment
+	// AcksAll waits for all in-sync replicas. It is the producer default and is
+	// required for an idempotent producer.
 	AcksAll Acks = -1
 )
 
-// Compression is a message compression codec. Its values are the
-// librdkafka compression.type names; the empty value means no compression.
+// Compression is a message compression codec. It is a string holding one of
+// librdkafka's compression.type values. The empty value and CompressionNone both
+// mean no compression; any other value that librdkafka does not support is
+// rejected by NewProducer.
 type Compression string
 
 const (
-	// CompressionNone - No compression
+	// CompressionNone disables compression.
 	CompressionNone Compression = "none"
-	// CompressionGZIP - GZIP compression
+	// CompressionGZIP compresses with gzip.
 	CompressionGZIP Compression = "gzip"
-	// CompressionSnappy - Snappy compression
+	// CompressionSnappy compresses with Snappy.
 	CompressionSnappy Compression = "snappy"
-	// CompressionLZ4 - LZ4 compression
+	// CompressionLZ4 compresses with LZ4.
 	CompressionLZ4 Compression = "lz4"
-	// CompressionZSTD - ZSTD compression
+	// CompressionZSTD compresses with Zstandard.
 	CompressionZSTD Compression = "zstd"
 )
 
-// PartitionAssignor represents partition assignment strategy
+// PartitionAssignor is a consumer group partition assignment strategy. Its
+// values are librdkafka's partition.assignment.strategy names.
 type PartitionAssignor string
 
 const (
-	// AssignorRange assigns partitions based on ranges
+	// AssignorRange assigns partitions topic by topic in contiguous ranges. It is
+	// the consumer default.
 	AssignorRange PartitionAssignor = "range"
-	// AssignorRoundRobin assigns partitions in round-robin fashion
+	// AssignorRoundRobin spreads partitions across the group members one by one.
 	AssignorRoundRobin PartitionAssignor = "roundrobin"
-	// AssignorCooperativeSticky uses cooperative rebalancing with sticky assignment
+	// AssignorCooperativeSticky keeps existing assignments stable and rebalances
+	// incrementally, so only the moved partitions are revoked.
 	AssignorCooperativeSticky PartitionAssignor = "cooperative-sticky"
 )
 
-// HealthStatus represents health check status
+// HealthStatus is the outcome of a health check.
 type HealthStatus string
 
 const (
-	// HealthStatusUp indicates the service is healthy
+	// HealthStatusUp means the check passed.
 	HealthStatusUp HealthStatus = "UP"
-	// HealthStatusDown indicates the service is unhealthy
+	// HealthStatusDown means the check failed; see HealthResult.Error and Details.
 	HealthStatusDown HealthStatus = "DOWN"
 )
 
-// HealthResult represents health check result
+// HealthResult is the result of a HealthChecker check. It marshals to JSON with
+// the lower-case keys shown on its fields.
 type HealthResult struct {
-	Status  HealthStatus   `json:"status"`
+	// Status is HealthStatusUp or HealthStatusDown.
+	Status HealthStatus `json:"status"`
+	// Details holds check-specific data; the HealthChecker method documents its
+	// keys. It may be empty or nil, notably when the check failed early.
 	Details map[string]any `json:"details,omitempty"`
-	Error   string         `json:"error,omitzero"`
+	// Error describes why the check is down. It is empty when Status is up, and
+	// also when a lag check is down only because the lag exceeds the limit.
+	Error string `json:"error,omitzero"`
 }
 
 // Handler types
 
-// MessageHandler handles a single message
+// MessageHandler handles a single message; register it with Consumer.OnMessage.
+// Returning nil parks the message (its offset may be stored); returning an
+// error starts the retry, error handler and DLQ flow. The context is derived
+// from the one passed to Consumer.Start.
 type MessageHandler func(ctx context.Context, msg *Message) error
 
-// BatchHandler handles a batch of messages
+// BatchHandler handles a batch of messages; register it with Consumer.OnBatch.
+// The messages are in consumption order and may come from several partitions.
+// Returning nil parks the whole batch; returning an error fails the whole
+// batch. If an idempotency key is configured, duplicates are removed before the
+// call, so the slice can be shorter than the number of messages consumed.
 type BatchHandler func(ctx context.Context, msgs []*Message) error
 
-// GroupedBatchHandler handles key-grouped batches
+// GroupedBatchHandler handles key-grouped batches; register it with
+// Consumer.OnGroupedBatch. Each GroupedBatch holds the messages of one key in
+// consumption order. Success and failure apply to the whole batch, as for
+// BatchHandler, and duplicates are removed before grouping.
 type GroupedBatchHandler func(ctx context.Context, groups []GroupedBatch) error
 
-// ErrorHandler handles errors during message processing. Returning nil means
-// the handler took ownership of the message: it is parked (its offset may
-// advance). Returning an error defers to the DLQ / block machinery.
+// ErrorHandler is called with a message the consumer could not process and the
+// error that failed it; register it with ConsumerWithErrorHandler. Returning
+// nil means the handler took ownership of the message: it is parked (its offset
+// may advance) and the DLQ is not used. Returning an error defers to the DLQ
+// or, without one, to blocking the partition. In batch mode it is called once
+// for each message of the failed batch. With SkipOnMaxRetries the message is
+// parked whatever it returns.
 type ErrorHandler func(ctx context.Context, msg *Message, err error) error
 
-// IdempotencyKeyFunc extracts idempotency key from message
+// IdempotencyKeyFunc returns the idempotency key of a message; set it with
+// ConsumerWithIdempotencyKey. Return an empty string for a message that must
+// never be treated as a duplicate. It must be cheap and must not modify the
+// message.
 type IdempotencyKeyFunc func(msg *Message) string
 
 // RebalanceType says whether a rebalance event assigned or revoked partitions.
@@ -122,7 +172,8 @@ const (
 	RebalanceRevoked RebalanceType = "revoked"
 )
 
-// RebalanceEvent represents a partition rebalance event
+// RebalanceEvent is delivered to the RebalanceCallback when partitions are
+// assigned to or revoked from this consumer.
 type RebalanceEvent struct {
 	// Type is RebalanceAssigned or RebalanceRevoked
 	Type RebalanceType
@@ -130,32 +181,47 @@ type RebalanceEvent struct {
 	Partitions []TopicPartition
 }
 
-// TopicPartition represents a topic and partition pair
+// TopicPartition identifies a partition of a topic.
 type TopicPartition struct {
-	Topic     string
+	// Topic is the topic name.
+	Topic string
+	// Partition is the partition number.
 	Partition int32
-	Offset    int64
+	// Offset is the offset librdkafka reports for the partition in a
+	// RebalanceEvent (often a logical value such as "unset", not a message
+	// position). It is not populated in Metrics.BlockedPartitions.
+	Offset int64
 }
 
-// RebalanceCallback is called when partitions are assigned or revoked
-// Return an error to abort the rebalance (use with caution)
+// RebalanceCallback is called when partitions are assigned or revoked; set it
+// with ConsumerWithRebalanceCallback. It runs on the goroutine running
+// Consumer.Start. A non-nil return is logged and makes the library skip its own
+// handling of that event (use with caution).
 type RebalanceCallback func(event RebalanceEvent) error
 
-// Metrics is a snapshot of the consumer's handler-failure and DLQ counters.
+// Metrics is a snapshot of the consumer's handler-failure and DLQ counters,
+// returned by Consumer.Metrics. The counters only grow, over the life of the
+// Consumer; BlockedPartitions is the state at the time of the snapshot.
 type Metrics struct {
-	// HandlerFailures counts every failed handler invocation, including the
-	// first attempt, not only the retries after it.
+	// HandlerFailures counts every failed invocation of a message handler,
+	// including the first attempt, not only the retries after it. A failed batch
+	// handler call is not counted.
 	HandlerFailures int64 `json:"handlerFailures"`
 	// SentToDLQ counts messages whose DLQ produce was confirmed.
 	SentToDLQ int64 `json:"sentToDlq"`
-	// ByTopic breaks both counters down by source topic.
+	// ByTopic breaks both counters down by source topic, keyed by the topic the
+	// message was consumed from (not the DLQ topic). Topics with no failures
+	// and no DLQ sends may be absent.
 	ByTopic map[string]TopicMetrics `json:"byTopic"`
-	// BlockedPartitions lists the partitions currently blocked on an
-	// unparkable message.
+	// BlockedPartitions is a snapshot, not a counter: the partitions blocked on
+	// an unparkable message at the time of the call. It shrinks as partitions
+	// recover or are revoked.
 	BlockedPartitions []TopicPartition `json:"blockedPartitions,omitempty"`
 }
 
-// TopicMetrics holds the counters for one source topic.
+// TopicMetrics holds the counters for one source topic; Metrics.ByTopic maps a
+// topic name to it. The counters are keyed by the topic the message was
+// consumed from.
 type TopicMetrics struct {
 	// HandlerFailures counts every failed handler invocation, including the
 	// first attempt, for messages from this topic.
