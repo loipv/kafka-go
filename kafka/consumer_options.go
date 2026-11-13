@@ -32,8 +32,7 @@ type ConsumerConfig struct {
 	IdempotencyTTL time.Duration
 
 	// DLQ
-	DLQ      *DLQConfig
-	DLQRetry *DLQRetryConfig
+	DLQ *DLQConfig
 
 	// Commit settings
 	AutoCommit         bool
@@ -69,34 +68,15 @@ type DLQConfig struct {
 	RetryDelay             time.Duration
 	RetryBackoffMultiplier float64
 	IncludeErrorInfo       bool
-	CircuitBreaker         *CircuitBreakerConfig
 
 	// Separate DLQ cluster. Empty Brokers inherits the consumer's connection
-	// (brokers, SSL, SASL, Raw). Set Brokers and the DLQ producer and DLQ
-	// retry consumer use only the SSL/SASL/Raw below — nothing is inherited,
-	// so the consumer's credentials never reach another cluster.
+	// (brokers, SSL, SASL, Raw). Set Brokers and the DLQ producer uses only the
+	// SSL/SASL/Raw below — nothing is inherited, so the consumer's credentials
+	// never reach another cluster.
 	Brokers []string
 	SSL     bool
 	SASL    *SASLConfig
 	Raw     map[string]any
-}
-
-// DLQRetryConfig holds DLQ auto-retry configuration
-type DLQRetryConfig struct {
-	Enabled           bool
-	MaxRetries        int
-	Delay             time.Duration
-	BackoffMultiplier float64
-	FinalDLQTopic     string
-	FromBeginning     bool
-	GroupID           string
-}
-
-// CircuitBreakerConfig holds circuit breaker configuration
-type CircuitBreakerConfig struct {
-	FailureThreshold int
-	SuccessThreshold int
-	Timeout          time.Duration
 }
 
 // ConsumerOption is a function that configures the consumer
@@ -206,13 +186,6 @@ func ConsumerWithIdempotencyTTL(ttl time.Duration) ConsumerOption {
 func ConsumerWithDLQ(dlq *DLQConfig) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.DLQ = dlq
-	}
-}
-
-// ConsumerWithDLQRetry sets DLQ retry configuration
-func ConsumerWithDLQRetry(retry *DLQRetryConfig) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.DLQRetry = retry
 	}
 }
 

@@ -99,18 +99,6 @@ type HealthResult struct {
 	Error   string         `json:"error,omitzero"`
 }
 
-// CircuitState represents circuit breaker states
-type CircuitState string
-
-const (
-	// CircuitClosed - Normal operation
-	CircuitClosed CircuitState = "CLOSED"
-	// CircuitOpen - DLQ blocked (failure threshold exceeded)
-	CircuitOpen CircuitState = "OPEN"
-	// CircuitHalfOpen - Testing recovery
-	CircuitHalfOpen CircuitState = "HALF_OPEN"
-)
-
 // Handler types
 
 // MessageHandler handles a single message
@@ -158,16 +146,12 @@ type DLQMetrics struct {
 
 // DLQGlobalMetrics represents global DLQ metrics
 type DLQGlobalMetrics struct {
-	HandlerRetries     int64 `json:"handlerRetries"`
-	MessagesSentToDLQ  int64 `json:"messagesSentToDlq"`
-	ReprocessAttempts  int64 `json:"reprocessAttempts"`
-	ReprocessSuccesses int64 `json:"reprocessSuccesses"`
-	ReprocessFailures  int64 `json:"reprocessFailures"`
+	HandlerRetries    int64 `json:"handlerRetries"`
+	MessagesSentToDLQ int64 `json:"messagesSentToDlq"`
 }
 
 // DLQTopicMetrics represents per-topic DLQ metrics
 type DLQTopicMetrics struct {
-	HandlerRetries    int64 `json:"handlerRetries"`
-	SentToDLQ         int64 `json:"sentToDlq"`
-	ReprocessAttempts int64 `json:"reprocessAttempts"`
+	HandlerRetries int64 `json:"handlerRetries"`
+	SentToDLQ      int64 `json:"sentToDlq"`
 }

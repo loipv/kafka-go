@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,9 +51,6 @@ type Consumer struct {
 	// backoff cycles instantaneous. Defaults to time.After.
 	after func(time.Duration) <-chan time.Time
 
-	// Circuit breaker for DLQ (written once in NewConsumer, read-only after)
-	circuitBreakers map[string]*CircuitBreaker
-
 	// Blocked partitions (at-least-once): partitions paused pending an
 	// escalating retry deadline because their message is unparkable.
 	blockMu sync.Mutex
@@ -98,16 +94,15 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	}
 
 	kc := &Consumer{
-		consumer:        consumer,
-		config:          config,
-		logger:          logger,
-		done:            make(chan struct{}),
-		flushCh:         make(chan struct{}, 1),
-		batch:           make([]*Message, 0, config.BatchSize),
-		circuitBreakers: make(map[string]*CircuitBreaker),
-		metrics:         NewDLQMetricsCollector(),
-		blocked:         make(map[TopicPartition]blockState),
-		after:           time.After,
+		consumer: consumer,
+		config:   config,
+		logger:   logger,
+		done:     make(chan struct{}),
+		flushCh:  make(chan struct{}, 1),
+		batch:    make([]*Message, 0, config.BatchSize),
+		metrics:  NewDLQMetricsCollector(),
+		blocked:  make(map[TopicPartition]blockState),
+		after:    time.After,
 	}
 
 	// Initialize tracing if enabled
@@ -126,11 +121,6 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		if err != nil {
 			_ = consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)
-		}
-
-		// Initialize circuit breaker for DLQ
-		if config.DLQ.CircuitBreaker != nil {
-			kc.circuitBreakers[config.DLQ.Topic] = NewCircuitBreaker(config.DLQ.CircuitBreaker)
 		}
 	}
 
@@ -180,11 +170,6 @@ func (c *Consumer) Start(ctx context.Context) error {
 	// Start batch flush ticker if batch processing is enabled
 	if c.config.BatchProcessing {
 		go c.batchFlushLoop(ctx)
-	}
-
-	// Start DLQ retry consumer if configured
-	if c.config.DLQRetry != nil && c.config.DLQRetry.Enabled {
-		go c.startDLQRetryConsumer(ctx)
 	}
 
 	// Main consume loop
@@ -237,7 +222,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 	}
 	atomic.StoreInt32(&c.running, 0)
 
-	// Stop helper goroutines (batch flush ticker, DLQ retry consumer)
+	// Stop helper goroutines (batch flush ticker)
 	close(c.done)
 
 	// Wait for the main loop to leave ReadMessage before destroying the
@@ -316,21 +301,6 @@ func boolToInt32(b bool) int32 {
 // DLQMetrics returns DLQ metrics
 func (c *Consumer) DLQMetrics() *DLQMetrics {
 	return c.metrics.GetMetrics()
-}
-
-// CircuitState returns circuit breaker state
-func (c *Consumer) CircuitState(dlqTopic string) CircuitState {
-	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
-		return cb.State()
-	}
-	return CircuitClosed
-}
-
-// ResetCircuit resets the circuit breaker
-func (c *Consumer) ResetCircuit(dlqTopic string) {
-	if cb, ok := c.circuitBreakers[dlqTopic]; ok {
-		cb.Reset()
-	}
 }
 
 // convertMessage converts ckafka.Message to Message
@@ -496,8 +466,8 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 }
 
 // handleError parks or blocks a failed message: the error handler can claim
-// ownership (nil return = parked), then the DLQ; with neither, or with the
-// circuit breaker open, the message is unparkable and its partition blocks.
+// ownership (nil return = parked), then the DLQ; with neither, or when the DLQ
+// produce fails, the message is unparkable and its partition blocks.
 func (c *Consumer) handleError(ctx context.Context, err error, msg *Message, attempts int) outcome {
 	if c.config.ErrorHandler != nil {
 		if handled := c.config.ErrorHandler(ctx, msg, err); handled == nil {
@@ -505,21 +475,9 @@ func (c *Consumer) handleError(ctx context.Context, err error, msg *Message, att
 		}
 	}
 	if c.dlqService != nil {
-		cb := c.circuitBreakers[c.config.DLQ.Topic]
-
-		if cb != nil && cb.IsOpen() {
-			c.logger.Warn("circuit breaker open — message unparkable", "topic", msg.Topic, "error", err)
-			return outcomeBlocked
-		}
 		if dlqErr := c.dlqService.produceToDLQ(ctx, msg, err, attempts); dlqErr != nil {
 			c.logger.Error("dlq produce failed", "error", dlqErr)
-			if cb != nil {
-				cb.RecordFailure()
-			}
 			return outcomeBlocked
-		}
-		if cb != nil {
-			cb.RecordSuccess()
 		}
 		return outcomeParked
 	}
@@ -669,162 +627,6 @@ func (c *Consumer) batchFlushLoop(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// startDLQRetryConsumer starts the DLQ retry consumer
-func (c *Consumer) startDLQRetryConsumer(ctx context.Context) {
-	if c.dlqService == nil || c.config.DLQRetry == nil {
-		return
-	}
-
-	retryConfig := c.config.DLQRetry
-	dlqTopic := c.config.DLQ.Topic
-
-	// Create DLQ consumer
-	groupID := retryConfig.GroupID
-	if groupID == "" {
-		groupID = fmt.Sprintf("%s-retry-consumer", dlqTopic)
-	}
-
-	cm := c.config.dlqConn().configMap()
-	cm["group.id"] = groupID
-	cm["auto.offset.reset"] = getOffsetReset(retryConfig.FromBeginning)
-	cm["enable.auto.commit"] = false // Task 10 makes commit-after-success explicit
-
-	// The retry consumer sleeps in-process between redeliveries
-	// (processDLQRetry); a sleep past max.poll.interval.ms would evict it
-	// from the group. Floor: max(300s, retryBudget*1.5, worstRetryDelay*1.5).
-	// ponytail: computed poll floor instead of pause+poll — upgrade if DLQ retry throughput ever matters
-	worstDelay := retryConfig.Delay
-	for i := 1; i < retryConfig.MaxRetries; i++ {
-		worstDelay = time.Duration(float64(worstDelay) * retryConfig.BackoffMultiplier)
-	}
-	mpi := 300 * time.Second
-	if need := time.Duration(float64(retryBudget(c.config.Retry)) * 1.5); need > mpi {
-		mpi = need
-	}
-	if need := time.Duration(float64(worstDelay) * 1.5); need > mpi {
-		mpi = need
-	}
-	cm["max.poll.interval.ms"] = int(mpi.Milliseconds())
-
-	dlqConsumer, err := ckafka.NewConsumer(&cm)
-	if err != nil {
-		c.logger.Error("failed to create dlq retry consumer", "error", err)
-		return
-	}
-	defer func() { _ = dlqConsumer.Close() }()
-
-	if err := dlqConsumer.Subscribe(dlqTopic, nil); err != nil {
-		c.logger.Error("failed to subscribe to dlq topic", "error", err)
-		return
-	}
-
-	commit := func() error { _, err := dlqConsumer.Commit(); return err }
-
-	c.logger.Info("dlq retry consumer started", "topic", dlqTopic)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			msg, err := dlqConsumer.ReadMessage(100 * time.Millisecond)
-			if err != nil {
-				var kafkaErr ckafka.Error
-				if errors.As(err, &kafkaErr) && kafkaErr.Code() == ckafka.ErrTimedOut {
-					continue
-				}
-				c.logger.Warn("dlq consumer error", "error", err)
-				continue
-			}
-
-			// Convert and process
-			message := c.convertMessage(msg)
-			c.processDLQRetry(ctx, message, retryConfig, commit)
-		}
-	}
-}
-
-// processDLQRetry processes a DLQ retry message. The consumer it runs on has
-// enable.auto.commit=false, so commit is explicit: only after a successful
-// reprocess or a final-DLQ handoff does the offset advance — a failure leaves
-// the message to be redelivered (#10).
-func (c *Consumer) processDLQRetry(ctx context.Context, msg *Message, config *DLQRetryConfig, commit func() error) {
-	c.metrics.IncrementReprocessAttempts(msg.Topic)
-
-	retryCount := 0
-	if countBytes, ok := msg.Headers["x-dlq-reprocess-count"]; ok {
-		retryCount, _ = strconv.Atoi(string(countBytes))
-	}
-	if retryCount >= config.MaxRetries {
-		c.logger.Warn("dlq max retries exceeded — sending to final dlq", "topic", msg.Topic, "offset", msg.Offset)
-		// Space cycles by one Delay: a persistently failing final-DLQ produce
-		// must not re-read and re-attempt with zero backoff.
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.after(config.Delay):
-		}
-		if config.FinalDLQTopic != "" {
-			if err := c.sendToFinalDLQ(ctx, msg, config.FinalDLQTopic); err != nil {
-				c.logger.Error("final dlq produce failed", "error", err)
-				return // not committed — genuinely re-picked-up
-			}
-		}
-		if err := commit(); err != nil {
-			c.logger.Warn("dlq retry commit failed", "error", err)
-		}
-		return
-	}
-
-	delay := config.Delay
-	for i := 0; i < retryCount; i++ {
-		delay = time.Duration(float64(delay) * config.BackoffMultiplier)
-	}
-	select {
-	case <-ctx.Done():
-		return
-	case <-c.after(delay):
-	}
-
-	msg.SetHeader("x-dlq-reprocess-count", []byte(strconv.Itoa(retryCount+1))) // #2 fixed via SetHeader
-	msg.SetHeader("x-dlq-reprocess-timestamp", appendTime(nil, time.Now()))
-
-	if err := c.invokeHandler(ctx, msg); err != nil { // #1: was c.messageHandler — nil panic
-		c.metrics.IncrementReprocessFailures()
-		c.logger.Warn("dlq reprocess failed — will be redelivered", "error", err)
-		// The count must travel on the message: re-produce it (headers now
-		// carry count+1 and a fresh timestamp) back to the DLQ topic it was
-		// read from, and only then commit the original. Without the
-		// re-produce, redelivery restarts from the broker copy at count=0 and
-		// the message never graduates to the final DLQ. If the re-produce
-		// fails, do NOT commit — the original stays for the next cycle
-		// (at-least-once preserved).
-		if rpErr := c.dlqService.produceToTopic(ctx, msg.Topic, msg); rpErr != nil {
-			c.logger.Error("dlq re-produce failed — original left in place", "error", rpErr)
-			return
-		}
-		if err := commit(); err != nil {
-			c.logger.Warn("dlq retry commit failed", "error", err)
-		}
-		return
-	}
-	c.metrics.IncrementReprocessSuccesses()
-	if err := commit(); err != nil {
-		c.logger.Warn("dlq retry commit failed", "error", err)
-	}
-}
-
-// sendToFinalDLQ sends message to final DLQ
-func (c *Consumer) sendToFinalDLQ(ctx context.Context, msg *Message, finalTopic string) error {
-	msg.SetHeader("x-final-dlq-reason", []byte("max retries exceeded"))
-	msg.SetHeader("x-final-dlq-timestamp", appendTime(nil, time.Now()))
-
-	if c.dlqService == nil {
-		return fmt.Errorf("dlq service not configured")
-	}
-	return c.dlqService.produceToTopic(ctx, finalTopic, msg)
 }
 
 // rebalanceCallback is ALWAYS installed (even without a user callback) so the

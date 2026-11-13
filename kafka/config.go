@@ -8,8 +8,8 @@ import (
 )
 
 // connConfig is the connection/auth configuration shared by every
-// librdkafka handle in this package. It exists so the DLQ producer, the DLQ
-// retry consumer, and the health checker can never again forget SSL/SASL.
+// librdkafka handle in this package. It exists so the DLQ producer and the
+// health checker can never again forget SSL/SASL.
 type connConfig struct {
 	Brokers  []string
 	ClientID string
@@ -59,7 +59,7 @@ func (c *ConsumerConfig) conn() connConfig {
 	return connConfig{Brokers: c.Brokers, SSL: c.SSL, SASL: c.SASL, Raw: c.Raw}
 }
 
-// dlqConn is the connection for every DLQ handle (producer, retry consumer):
+// dlqConn is the connection for every DLQ handle (the DLQ producer):
 // the consumer's own unless DLQ.Brokers points at a separate cluster.
 func (c *ConsumerConfig) dlqConn() connConfig {
 	if c.DLQ == nil || len(c.DLQ.Brokers) == 0 {
@@ -115,9 +115,9 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 		cm["partition.assignment.strategy"] = string(c.PartitionAssignor)
 	}
 
-	// max.poll.interval.ms is contested by three features (explicit
-	// RebalanceTimeout, the in-loop retry budget, the DLQ retry sleep).
-	// Take the max of all three, floored at librdkafka's 300s default, so
+	// max.poll.interval.ms is contested by two features (explicit
+	// RebalanceTimeout, the in-loop retry budget).
+	// Take the max of both, floored at librdkafka's 300s default, so
 	// wiring a low explicit value can never make batch consumers MORE
 	// fragile: max(explicit, retryBudget*1.5, 300s).
 	mpiMs := 300000

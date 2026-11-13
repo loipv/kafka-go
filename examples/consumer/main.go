@@ -1,4 +1,4 @@
-// Command consumer demonstrates batch consumption with DLQ, DLQ retry,
+// Command consumer demonstrates batch consumption with DLQ,
 // idempotency, and tracing.
 package main
 
@@ -44,20 +44,6 @@ func main() {
 			RetryDelay:             1 * time.Second,
 			RetryBackoffMultiplier: 2.0,
 			IncludeErrorInfo:       true,
-			CircuitBreaker: &kafka.CircuitBreakerConfig{
-				FailureThreshold: 5,
-				SuccessThreshold: 2,
-				Timeout:          30 * time.Second,
-			},
-		}),
-
-		// DLQ auto-retry
-		kafka.ConsumerWithDLQRetry(&kafka.DLQRetryConfig{
-			Enabled:           true,
-			MaxRetries:        5,
-			Delay:             1 * time.Minute,
-			BackoffMultiplier: 2.0,
-			FinalDLQTopic:     "orders-dlq-final",
 		}),
 
 		// Idempotency

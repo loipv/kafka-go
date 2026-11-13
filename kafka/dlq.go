@@ -137,102 +137,6 @@ func (s *DLQService) Close() error {
 	return nil
 }
 
-// CircuitBreaker implements the circuit breaker pattern
-type CircuitBreaker struct {
-	config          *CircuitBreakerConfig
-	state           CircuitState
-	failures        int
-	successes       int
-	lastFailureTime time.Time
-	now             func() time.Time // seam for tests; defaults to time.Now
-	mu              sync.Mutex       // Use Mutex instead of RWMutex to avoid lock upgrade issues
-}
-
-// NewCircuitBreaker creates a new circuit breaker
-func NewCircuitBreaker(config *CircuitBreakerConfig) *CircuitBreaker {
-	return &CircuitBreaker{
-		config: config,
-		state:  CircuitClosed,
-		now:    time.Now,
-	}
-}
-
-// State returns the current circuit state
-func (cb *CircuitBreaker) State() CircuitState {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	// Check if we should transition from open to half-open
-	if cb.state == CircuitOpen {
-		if cb.now().Sub(cb.lastFailureTime) >= cb.config.Timeout {
-			cb.state = CircuitHalfOpen
-			cb.successes = 0
-		}
-	}
-
-	return cb.state
-}
-
-// RecordSuccess records a successful operation
-func (cb *CircuitBreaker) RecordSuccess() {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	cb.successes++
-
-	switch cb.state {
-	case CircuitHalfOpen:
-		if cb.successes >= cb.config.SuccessThreshold {
-			cb.state = CircuitClosed
-			cb.failures = 0
-			cb.successes = 0
-		}
-	case CircuitClosed:
-		// Reset failures on success
-		cb.failures = 0
-	}
-}
-
-// RecordFailure records a failed operation
-func (cb *CircuitBreaker) RecordFailure() {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	cb.failures++
-	cb.lastFailureTime = cb.now()
-
-	switch cb.state {
-	case CircuitClosed:
-		if cb.failures >= cb.config.FailureThreshold {
-			cb.state = CircuitOpen
-		}
-	case CircuitHalfOpen:
-		// Any failure in half-open goes back to open
-		cb.state = CircuitOpen
-		cb.successes = 0
-	}
-}
-
-// Reset resets the circuit breaker
-func (cb *CircuitBreaker) Reset() {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	cb.state = CircuitClosed
-	cb.failures = 0
-	cb.successes = 0
-}
-
-// IsOpen returns true if circuit is open
-func (cb *CircuitBreaker) IsOpen() bool {
-	return cb.State() == CircuitOpen
-}
-
-// IsClosed returns true if circuit is closed
-func (cb *CircuitBreaker) IsClosed() bool {
-	return cb.State() == CircuitClosed
-}
-
 // DLQMetricsCollector collects DLQ metrics
 type DLQMetricsCollector struct {
 	global  DLQGlobalMetrics
@@ -288,23 +192,6 @@ func (m *DLQMetricsCollector) IncrementSentToDLQ(topic string) {
 	atomic.AddInt64(&metrics.SentToDLQ, 1)
 }
 
-// IncrementReprocessAttempts increments reprocess attempts
-func (m *DLQMetricsCollector) IncrementReprocessAttempts(topic string) {
-	atomic.AddInt64(&m.global.ReprocessAttempts, 1)
-	metrics := m.getOrCreateTopicMetrics(topic)
-	atomic.AddInt64(&metrics.ReprocessAttempts, 1)
-}
-
-// IncrementReprocessSuccesses increments reprocess successes
-func (m *DLQMetricsCollector) IncrementReprocessSuccesses() {
-	atomic.AddInt64(&m.global.ReprocessSuccesses, 1)
-}
-
-// IncrementReprocessFailures increments reprocess failures
-func (m *DLQMetricsCollector) IncrementReprocessFailures() {
-	atomic.AddInt64(&m.global.ReprocessFailures, 1)
-}
-
 // SetBlocked stores an atomic snapshot of the currently blocked partitions.
 func (m *DLQMetricsCollector) SetBlocked(tps []TopicPartition) {
 	m.mu.Lock()
@@ -320,19 +207,15 @@ func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
 	byTopic := make(map[string]DLQTopicMetrics)
 	for k, v := range m.byTopic {
 		byTopic[k] = DLQTopicMetrics{
-			HandlerRetries:    atomic.LoadInt64(&v.HandlerRetries),
-			SentToDLQ:         atomic.LoadInt64(&v.SentToDLQ),
-			ReprocessAttempts: atomic.LoadInt64(&v.ReprocessAttempts),
+			HandlerRetries: atomic.LoadInt64(&v.HandlerRetries),
+			SentToDLQ:      atomic.LoadInt64(&v.SentToDLQ),
 		}
 	}
 
 	return &DLQMetrics{
 		Global: DLQGlobalMetrics{
-			HandlerRetries:     atomic.LoadInt64(&m.global.HandlerRetries),
-			MessagesSentToDLQ:  atomic.LoadInt64(&m.global.MessagesSentToDLQ),
-			ReprocessAttempts:  atomic.LoadInt64(&m.global.ReprocessAttempts),
-			ReprocessSuccesses: atomic.LoadInt64(&m.global.ReprocessSuccesses),
-			ReprocessFailures:  atomic.LoadInt64(&m.global.ReprocessFailures),
+			HandlerRetries:    atomic.LoadInt64(&m.global.HandlerRetries),
+			MessagesSentToDLQ: atomic.LoadInt64(&m.global.MessagesSentToDLQ),
 		},
 		ByTopic:           byTopic,
 		BlockedPartitions: append([]TopicPartition(nil), m.blocked...),
@@ -346,9 +229,6 @@ func (m *DLQMetricsCollector) ResetMetrics() {
 
 	atomic.StoreInt64(&m.global.HandlerRetries, 0)
 	atomic.StoreInt64(&m.global.MessagesSentToDLQ, 0)
-	atomic.StoreInt64(&m.global.ReprocessAttempts, 0)
-	atomic.StoreInt64(&m.global.ReprocessSuccesses, 0)
-	atomic.StoreInt64(&m.global.ReprocessFailures, 0)
 
 	m.blocked = nil
 	m.byTopic = make(map[string]*DLQTopicMetrics)
