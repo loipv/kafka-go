@@ -244,3 +244,39 @@ func TestProducer_RequiresBrokers(t *testing.T) {
 		})
 	}
 }
+
+// With the broker down and more messages than the queue holds, ProduceBatch
+// waits for queue space; a context deadline must end that wait promptly.
+func TestProducer_ProduceBatchBackPressureHonoursContext(t *testing.T) {
+	skipIfShort(t)
+	old := closeFlushTimeout // the queue never drains: keep Close from flushing for its full default
+	closeFlushTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { closeFlushTimeout = old })
+
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithRawConfig(map[string]any{"queue.buffering.max.messages": 10}))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+
+	msgs := make([]*Message, 50)
+	for i := range msgs {
+		msgs[i] = &Message{Value: []byte("v")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err = p.ProduceBatch(ctx, topic, msgs)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ProduceBatch() = %v, want an error wrapping context.DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("ProduceBatch took %v after a 2s deadline, want it to return promptly", d)
+	}
+}

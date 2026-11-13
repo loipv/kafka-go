@@ -313,3 +313,47 @@ func TestBlockedPartition_ClearedOnPark(t *testing.T) {
 		t.Errorf("blocked gauge = %+v, want drained", got)
 	}
 }
+
+// Batch mode: a failing OnBatch handler with no error handler and no DLQ leaves
+// the batch unparkable, so the partition blocks and no offset is committed.
+func TestBlockedPartition_NoDLQBatchBlocks(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithBatchSize(2), ConsumerWithBatchTimeout(200*time.Millisecond))...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(context.Context, []*Message) error { return errors.New("batch always fails") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	for i := range 2 {
+		if err := p.Produce(context.Background(), topic, &Message{Value: []byte{byte('0' + i)}}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+
+	waitFor(t, 15*time.Second, func() bool {
+		return len(c.Metrics().BlockedPartitions) > 0
+	}, "partition never reported blocked for the unparkable batch")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 1 {
+			t.Fatalf("committed offset = %d while the batch is unparkable, want no commit", off)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}

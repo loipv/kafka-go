@@ -400,3 +400,92 @@ func TestDLQ_ConfirmEvent(t *testing.T) {
 		t.Error("non-message event err = nil, want an error")
 	}
 }
+
+func TestDLQ_TruncateUTF8EdgeCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		limit int
+		want  string
+	}{
+		{"zero limit", "abc", 0, ""},
+		{"negative limit", "abc", -5, ""},
+		{"exact fit is unchanged", "abcd", 4, "abcd"},
+		{"3-byte rune straddling the limit is dropped whole", strings.Repeat("a", 3) + "€", 4, "aaa"},
+		{"3-byte rune cut after its 2nd byte is dropped whole", strings.Repeat("a", 3) + "€", 5, "aaa"},
+		{"4-byte rune straddling the limit is dropped whole", strings.Repeat("a", 2) + "😀", 4, "aa"},
+		{"rune ending exactly on the limit is kept", strings.Repeat("a", 3) + "€", 6, "aaa€"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateUTF8(tt.in, tt.limit)
+			if got != tt.want || !utf8.ValidString(got) {
+				t.Errorf("truncateUTF8(%q, %d) = %q (valid=%v), want %q", tt.in, tt.limit, got, utf8.ValidString(got), tt.want)
+			}
+		})
+	}
+}
+
+// The header cap is wired into the DLQ record: an over-long handler error
+// reaches the x-dlq-error-message header cut to maxDLQErrorBytes, and the
+// caller's Message is left untouched.
+func TestDLQ_BuildMessageCapsErrorHeader(t *testing.T) {
+	s := &dlqService{config: &DLQConfig{Topic: "dlq", IncludeErrorInfo: true}}
+	msg := &Message{Topic: "orders", Value: []byte("v"), Headers: Headers{"h": []byte("1")}}
+	cause := errors.New(strings.Repeat("e", 3000))
+
+	out := s.buildDLQMessage(msg, cause, 3)
+
+	hdrs := map[string][]byte{}
+	for _, h := range out.Headers {
+		hdrs[h.Key] = h.Value
+	}
+	if got := len(hdrs["x-dlq-error-message"]); got != maxDLQErrorBytes {
+		t.Errorf("x-dlq-error-message = %d bytes, want %d", got, maxDLQErrorBytes)
+	}
+	if got := string(hdrs["x-dlq-handler-retry-count"]); got != "3" {
+		t.Errorf("x-dlq-handler-retry-count = %q, want 3", got)
+	}
+	if got := string(hdrs["h"]); got != "1" {
+		t.Errorf("original header h = %q, want it carried over", got)
+	}
+	if _, ok := msg.Headers["x-dlq-error-message"]; ok {
+		t.Error("buildDLQMessage mutated the caller's Message headers")
+	}
+
+	s.config.IncludeErrorInfo = false
+	for _, h := range s.buildDLQMessage(msg, cause, 1).Headers {
+		if h.Key == "x-dlq-error-message" {
+			t.Error("x-dlq-error-message present with IncludeErrorInfo=false")
+		}
+	}
+}
+
+// With the broker unreachable the delivery report never arrives before the
+// context ends: produceAll must return an error wrapping the context's and
+// must not count the message as sent.
+func TestDLQ_ProduceAllContextEndsBeforeDeliveryReports(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	metrics := newMetricsCollector()
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, metrics)
+	if err != nil {
+		t.Fatalf("newDLQService: %v", err)
+	}
+	defer s.Close()
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	msgs := []*Message{{Topic: "src", Value: []byte("a")}, {Topic: "src", Value: []byte("b")}}
+	err = s.produceAll(ctx, msgs, errors.New("boom"), 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("produceAll() = %v, want an error wrapping context.DeadlineExceeded", err)
+	}
+	if got := metrics.snapshot().SentToDLQ; got != 0 {
+		t.Errorf("SentToDLQ = %d, want 0 (nothing confirmed)", got)
+	}
+}
