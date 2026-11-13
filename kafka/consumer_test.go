@@ -890,7 +890,7 @@ func TestConsumer_PauseResume(t *testing.T) {
 }
 
 // shutdownMidHandler runs one consumer with a DLQ topic and an error handler
-// that records its calls and claims every message, registers the handler set
+// that records its calls and declines every message, registers the handler set
 // by register, produces n messages and, once the handler has started, cancels
 // the Start context and closes the consumer. It returns the error handler's
 // call count and the DLQ topic.
@@ -906,9 +906,9 @@ func shutdownMidHandler(t *testing.T, mc *ckafka.MockCluster, topic, group strin
 		// Short session: the mock coordinator completes the next member's join
 		// only after this one's session expires.
 		ConsumerWithSessionTimeout(6*time.Second), ConsumerWithHeartbeatInterval(2*time.Second),
-		ConsumerWithErrorHandler(func(context.Context, *Message, error) error {
+		ConsumerWithErrorHandler(func(_ context.Context, _ *Message, err error) error {
 			calls.Add(1)
-			return nil // would claim the message: park it and move on
+			return err // declines the message, so a wrongly failed one reaches the DLQ
 		}),
 	), opts...)...)
 	if err != nil {
