@@ -1027,3 +1027,96 @@ func TestConsumer_ShutdownMidBatchDoesNotParkOrDeadLetter(t *testing.T) {
 	}
 	assertRedelivered(t, mc, topic, group, 3)
 }
+
+// Start may be called again on the same Consumer after its context ended. A
+// message or batch that shutdown interrupted must come back on that second run
+// even when the assignor keeps the partition (cooperative-sticky): the fetch
+// position survives the restart, so only a seek back redelivers it.
+func TestConsumer_RestartAfterInterruptRedelivers(t *testing.T) {
+	skipIfShort(t)
+	tests := []struct {
+		name     string
+		opts     []ConsumerOption
+		register func(c *Consumer, h BatchHandler)
+	}{
+		{"single", nil, func(c *Consumer, h BatchHandler) {
+			c.OnMessage(func(ctx context.Context, m *Message) error { return h(ctx, []*Message{m}) })
+		}},
+		{"batch", []ConsumerOption{ConsumerWithBatchSize(2), ConsumerWithBatchTimeout(time.Hour)},
+			func(c *Consumer, h BatchHandler) { c.OnBatch(h) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := newMockCluster(t)
+			topic := uniqueTopic(t, mc, 1)
+			c, err := NewConsumer(append(fastAtLeastOnce(
+				ConsumerWithBrokers(mc.BootstrapServers()),
+				ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+				ConsumerWithPartitionAssignor(AssignorCooperativeSticky),
+			), tt.opts...)...)
+			if err != nil {
+				t.Fatalf("NewConsumer: %v", err)
+			}
+			defer c.Close(context.Background())
+
+			var interrupt atomic.Bool
+			interrupt.Store(true)
+			started := make(chan struct{}, 1)
+			got := make(chan *Message, 8)
+			tt.register(c, func(ctx context.Context, msgs []*Message) error {
+				if interrupt.Load() {
+					select {
+					case started <- struct{}{}:
+					default:
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				for _, m := range msgs {
+					got <- m
+				}
+				return nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			exited := make(chan error, 1)
+			go func() { exited <- c.Start(ctx) }()
+
+			p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+			if err != nil {
+				t.Fatalf("NewProducer: %v", err)
+			}
+			defer p.Close()
+			for i := range 2 {
+				if err := p.Produce(context.Background(), topic, &Message{Value: []byte{byte('0' + i)}}); err != nil {
+					t.Fatalf("Produce: %v", err)
+				}
+			}
+			select {
+			case <-started:
+			case <-time.After(15 * time.Second):
+				t.Fatal("handler never started")
+			}
+			interrupt.Store(false)
+			cancel()
+			select {
+			case err := <-exited:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("first Start() = %v, want context.Canceled", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("first Start did not return")
+			}
+
+			ctx2, cancel2 := context.WithCancel(context.Background())
+			defer cancel2()
+			go func() { _ = c.Start(ctx2) }()
+			for i, m := range recvMessages(t, got, 2, 20*time.Second) {
+				if m.Offset != int64(i) {
+					t.Errorf("message %d of the second run has offset %d, want %d", i, m.Offset, i)
+				}
+			}
+		})
+	}
+}

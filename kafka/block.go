@@ -80,6 +80,22 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 	}
 }
 
+// seekBack rewinds each partition of msgs to its lowest offset among them.
+// Shutdown leaves an interrupted message unstored, but the client's fetch
+// position is already past it: without the rewind, a second Start that keeps
+// the assignment (cooperative-sticky) would skip the message, and the next
+// stored offset would commit past it.
+func (c *Consumer) seekBack(msgs []*Message) {
+	for tp, off := range minOffsets(msgs) {
+		topic := tp.Topic
+		target := ckafka.TopicPartition{Topic: &topic, Partition: tp.Partition, Offset: ckafka.Offset(off)}
+		if err := c.consumer.Seek(target, 5000); err != nil {
+			c.logger.Warn("seek back failed for interrupted message",
+				"topic", tp.Topic, "partition", tp.Partition, "offset", off, "error", err)
+		}
+	}
+}
+
 // resumeBlocked resumes partitions whose backoff elapsed. Called each poll
 // pass. Skips partitions while the user-level Pause() is active. Entries are
 // NOT deleted here: blocks must keep escalating across cycles until the

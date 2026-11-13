@@ -502,7 +502,8 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 
 // deliver is the poll-loop entry for a single message: park (store the offset)
 // or block (pause the partition and seek back). An interrupted message gets
-// neither: it stays unstored and is redelivered after the restart.
+// neither: it stays unstored and is seeked back, so it is redelivered whether
+// the next run is this Consumer's or another member's.
 func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	switch c.processMessage(ctx, msg) {
 	case outcomeParked:
@@ -511,6 +512,7 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	case outcomeBlocked:
 		c.blockMessages(ctx, []*Message{msg})
 	case outcomeInterrupted: // nothing stored, nothing paused
+		c.seekBack([]*Message{msg})
 	}
 }
 
@@ -591,8 +593,9 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 
 	// A handler error after the context ended is shutdown interrupting the
 	// batch, not a failure: nothing is stored, blocked or recorded, and the
-	// whole batch is redelivered after the restart.
+	// whole batch is seeked back and redelivered after the restart.
 	if processingErr != nil && ctx.Err() != nil {
+		c.seekBack(batch)
 		return outcomeInterrupted
 	}
 
@@ -793,14 +796,15 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 
 // outcome is what processMessage/processBatch report to the poll loop: the
 // message(s) parked (offset may be stored), blocked (partition must pause), or
-// were interrupted by shutdown (neither: nothing is stored or paused, and the
-// message(s) are redelivered after the restart).
+// were interrupted by shutdown (neither: nothing is stored or paused; the
+// partitions are seeked back and the message(s) are redelivered after the
+// restart).
 type outcome int
 
 const (
 	outcomeParked      outcome = iota // offset may be stored — message is durably dealt with
 	outcomeBlocked                    // unparkable — partition must block and retry
-	outcomeInterrupted                // shutdown cut the handler short — leave unstored
+	outcomeInterrupted                // shutdown cut the handler short — leave unstored, seek back
 )
 
 // ignoreNoOffset maps librdkafka's "no offset stored" (nothing to commit) to nil
