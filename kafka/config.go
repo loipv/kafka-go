@@ -146,10 +146,14 @@ func buildProducerConfig(c *ProducerConfig) ckafka.ConfigMap {
 	return cm
 }
 
+// maxPollIntervalLimitMs is librdkafka's upper bound for max.poll.interval.ms.
+const maxPollIntervalLimitMs = 86400000
+
 // buildConsumerConfig returns the librdkafka config for a consumer: the shared
 // connection/auth keys (Raw merged in), then the keys the library owns, which
-// Raw cannot override (see ConsumerWithRawConfig). It fails when
-// session.timeout.ms is not below the computed max.poll.interval.ms.
+// Raw cannot override (see ConsumerWithRawConfig). It fails when the computed
+// max.poll.interval.ms exceeds librdkafka's 24h limit, and when
+// session.timeout.ms is not below it.
 func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	cm := c.conn().configMap()
 	cm["group.id"] = c.GroupID
@@ -178,16 +182,32 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 	// wiring a low explicit value can never make batch consumers MORE
 	// fragile: max(explicit, (retryBudget+dlqTimeout)*1.5, 300s). dlqTimeout
 	// is counted once, however many messages a failed batch sends to the DLQ.
+	// Above librdkafka's limit the value is rejected rather than clamped: a
+	// clamp would let the retry or DLQ wait outlast the poll interval.
 	mpiMs := 300000
 	if c.RebalanceTimeout > 0 {
-		if explicit := int(c.RebalanceTimeout.Milliseconds()); explicit > mpiMs {
-			mpiMs = explicit
+		explicit := c.RebalanceTimeout.Milliseconds()
+		if explicit > maxPollIntervalLimitMs {
+			return nil, fmt.Errorf("ConsumerWithRebalanceTimeout (%v) exceeds librdkafka's max.poll.interval.ms limit of %d ms (24h)",
+				c.RebalanceTimeout, maxPollIntervalLimitMs)
+		}
+		if int(explicit) > mpiMs {
+			mpiMs = int(explicit)
 		}
 	}
-	if b := retryBudget(normalizeRetry(c.Retry)) + c.dlqTimeout(); b > 0 {
-		if need := int(float64(b.Milliseconds()) * 1.5); need > mpiMs {
-			mpiMs = need
+	budget, dlq := retryBudget(normalizeRetry(c.Retry)), c.dlqTimeout() // budget > 0: normalizeRetry sets every field
+	need := float64((budget + dlq).Milliseconds()) * 1.5
+	if need > maxPollIntervalLimitMs {
+		cause, fix := fmt.Sprintf("the RetryConfig retry budget (%v)", budget), "the RetryConfig waits"
+		if dlq > 0 {
+			cause += fmt.Sprintf(" plus the DLQ delivery timeout (%v)", dlq)
+			fix += " or the DLQ delivery timeout"
 		}
+		return nil, fmt.Errorf("max.poll.interval.ms derived as 1.5 x %s = %.0f ms exceeds librdkafka's limit of %d ms (24h); lower %s",
+			cause, need, maxPollIntervalLimitMs, fix)
+	}
+	if int(need) > mpiMs {
+		mpiMs = int(need)
 	}
 	cm["max.poll.interval.ms"] = mpiMs
 

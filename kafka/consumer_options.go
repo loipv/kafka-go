@@ -233,7 +233,9 @@ func ConsumerWithHeartbeatInterval(interval time.Duration) ConsumerOption {
 // set, the effective value is the largest of the option, the 300s floor, and 1.5
 // times the sum of the handler retry budget (the sum of the retry waits of
 // ConsumerWithRetry) and the DLQ delivery timeout, so a low value can never
-// make the consumer less tolerant than the default.
+// make the consumer less tolerant than the default. librdkafka caps the value at
+// 24h: NewConsumer returns an error naming the cause when the option, or the
+// value derived from the retry budget and DLQ timeout, exceeds it.
 func ConsumerWithRebalanceTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.RebalanceTimeout = timeout

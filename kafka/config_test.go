@@ -229,6 +229,54 @@ func TestBuildConsumerConfig(t *testing.T) {
 			t.Error("buildConsumerConfig() = nil error with session.timeout >= max.poll.interval, want error")
 		}
 	})
+	// librdkafka caps max.poll.interval.ms at 86400000 (24h); exceeding it must
+	// fail with an error naming the cause and the limit, not be clamped.
+	hugeRetry := &RetryConfig{MaxRetries: 2000, InitialInterval: 30 * time.Second, Multiplier: 1} // 1000 min budget
+	for _, tt := range []struct {
+		name      string
+		configure func(*ConsumerConfig)
+		want      []string
+		notWant   []string
+	}{
+		{"retry budget beyond the limit is rejected", func(c *ConsumerConfig) { c.Retry = hugeRetry },
+			[]string{"RetryConfig", "86400000"}, []string{"DLQ", "ConsumerWithRebalanceTimeout"}},
+		{"retry budget plus DLQ timeout beyond the limit names both", func(c *ConsumerConfig) {
+			c.Retry = hugeRetry
+			c.DLQ = &DLQConfig{Topic: "d"}
+		}, []string{"RetryConfig", "DLQ", "86400000"}, nil},
+		{"explicit rebalance timeout beyond the limit is rejected", func(c *ConsumerConfig) { c.RebalanceTimeout = 25 * time.Hour },
+			[]string{"ConsumerWithRebalanceTimeout", "86400000"}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.configure(c)
+			_, err := buildConsumerConfig(c)
+			if err == nil {
+				t.Fatal("buildConsumerConfig() = nil error, want max.poll.interval.ms limit error")
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not mention %q", err, w)
+				}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(err.Error(), nw) {
+					t.Errorf("error %q mentions %q, which is not in play", err, nw)
+				}
+			}
+		})
+	}
+	t.Run("exactly the limit is accepted", func(t *testing.T) {
+		c := base()
+		c.RebalanceTimeout = 24 * time.Hour
+		cm, err := buildConsumerConfig(c)
+		if err != nil {
+			t.Fatalf("buildConsumerConfig: %v", err)
+		}
+		if v, _ := cm.Get("max.poll.interval.ms", nil); v != 86400000 {
+			t.Errorf("max.poll.interval.ms = %v, want 86400000", v)
+		}
+	})
 }
 
 func TestBuildProducerConfig(t *testing.T) {

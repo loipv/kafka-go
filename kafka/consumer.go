@@ -83,8 +83,9 @@ type Consumer struct {
 // returns ErrBrokersRequired, ErrGroupIDRequired, ErrTopicsRequired,
 // ErrDLQTopicRequired, ErrInvalidBatchSize or ErrInvalidBatchTimeout for the
 // corresponding problem, or an error when the librdkafka configuration is
-// rejected (including a session timeout not below max.poll.interval.ms). It
-// does not connect or subscribe; that happens in Start.
+// rejected (including a session timeout not below max.poll.interval.ms, and a
+// max.poll.interval.ms above librdkafka's 24h limit). It does not connect or
+// subscribe; that happens in Start.
 func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	config := newDefaultConsumerConfig()
 	for _, opt := range opts {
