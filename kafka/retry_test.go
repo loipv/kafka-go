@@ -178,14 +178,44 @@ func TestRetry_BackoffMath(t *testing.T) {
 	}
 }
 
+// Cancelling the context during a retry wait reports the run as interrupted
+// by shutdown, wrapping the context's error.
 func TestRetry_ContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
-		after:   func(_ time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
+		after: func(time.Duration) <-chan time.Time {
+			cancel() // the context ends while the retry wait is in progress
+			return make(chan time.Time) // never fires
+		},
+		done:    make(chan struct{}),
 		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if attempts, _ := c.executeWithRetry(ctx, &Message{}); attempts == 0 {
-		t.Error("expected at least one attempt before ctx cancellation")
+
+	attempts, err := c.executeWithRetry(ctx, &Message{})
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 (the wait after the first attempt was interrupted)", attempts)
+	}
+	if !errors.Is(err, errInterrupted) || !errors.Is(err, context.Canceled) {
+		t.Errorf("executeWithRetry() = %v, want an error wrapping errInterrupted and context.Canceled", err)
+	}
+}
+
+// Close (c.done) during a retry wait also reports an interrupted run, wrapping
+// the last handler error.
+func TestRetry_CloseDuringWaitIsInterrupted(t *testing.T) {
+	handlerErr := errors.New("boom")
+	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
+		done:    make(chan struct{}),
+		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
+	c.after = func(time.Duration) <-chan time.Time {
+		close(c.done) // Close is called while the retry wait is in progress
+		return make(chan time.Time)
+	}
+	c.messageHandler = func(context.Context, *Message) error { return handlerErr }
+
+	_, err := c.executeWithRetry(context.Background(), &Message{})
+	if !errors.Is(err, errInterrupted) || !errors.Is(err, handlerErr) {
+		t.Errorf("executeWithRetry() = %v, want an error wrapping errInterrupted and the handler error", err)
 	}
 }

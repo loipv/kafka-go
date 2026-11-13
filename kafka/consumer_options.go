@@ -363,7 +363,9 @@ func ConsumerWithRetry(retry *RetryConfig) ConsumerOption {
 // message of a failed batch). The default is nil. See ErrorHandler: returning
 // nil means the handler took ownership of the message, so it is parked and its
 // offset may advance; returning an error defers to the DLQ or, without one,
-// blocks the partition.
+// blocks the partition. It is not called when shutdown (a cancelled Start
+// context, or Close) interrupted the handler or its retries: such a message is
+// left unstored and redelivered.
 func ConsumerWithErrorHandler(handler ErrorHandler) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.ErrorHandler = handler

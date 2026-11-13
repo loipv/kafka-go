@@ -224,6 +224,12 @@ func isFatalClientError(err error) bool {
 //
 // Whichever way Start returns, call Close afterwards, including after a fatal
 // error: Start does not release the client or flush the last partial batch.
+//
+// Cancelling ctx is a graceful shutdown, not a handler failure: a message or
+// batch whose handler (or retry wait) is in flight when ctx ends is neither
+// parked nor blocked. Its offset is not stored, the error handler and the DLQ
+// are not invoked, and it is redelivered when the group next consumes the
+// partition. Handlers should honour ctx so shutdown is prompt.
 func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler
@@ -307,9 +313,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 //
 // ctx bounds only that final batch flush: it is the context passed to the batch
 // handler, the error handler and the DLQ for the remaining messages, so a
-// cancelled ctx cuts the flush short. Cancel the Start context before calling Close when handlers or
-// retries can run long: without a cancel, Close falls back to the bounded 5s
-// wait and may then close the handle while a long retry is still in flight.
+// cancelled ctx cuts the flush short; a batch whose handler fails after ctx
+// ended is left unstored and redelivered, like any batch shutdown interrupts.
+// Cancel the Start context before calling Close when handlers or retries can
+// run long: without a cancel, Close falls back to the bounded 5s wait and may
+// then close the handle while a long retry is still in flight. A message whose
+// retry wait Close interrupts is not handed to the error handler or the DLQ: it
+// is left unstored and redelivered (see Start).
 //
 // Close is safe to call more than once; later calls return nil and do nothing.
 func (c *Consumer) Close(ctx context.Context) error {
@@ -435,8 +445,8 @@ func (c *Consumer) convertMessage(msg *ckafka.Message) *Message {
 }
 
 // processMessage processes a single message and reports whether it parked
-// (durably dealt with — its offset may be stored) or blocked (unparkable —
-// its partition must be paused and retried).
+// (durably dealt with — its offset may be stored), blocked (unparkable — its
+// partition must be paused and retried) or was interrupted by shutdown.
 func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	// Check idempotency BEFORE processing. A skipped duplicate is parked: its
 	// offset may advance (it was already dealt with on a previous delivery).
@@ -475,6 +485,11 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	if endSpan != nil {
 		endSpan(err)
 	}
+	if errors.Is(err, errInterrupted) || ctx.Err() != nil {
+		// Shutdown cut the handler short: not a handler failure. No error
+		// handler, no DLQ, no idempotency key; the message is redelivered.
+		return outcomeInterrupted
+	}
 	if errors.Is(err, ErrSkippedOnMaxRetries) {
 		// The one explicit opt-in to loss: best-effort DLQ + notify, then advance.
 		_ = c.handleError(ctx, err, msg, attempts)
@@ -484,7 +499,8 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 }
 
 // deliver is the poll-loop entry for a single message: park (store the offset)
-// or block (pause the partition and seek back).
+// or block (pause the partition and seek back). An interrupted message gets
+// neither: it stays unstored and is redelivered after the restart.
 func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	switch c.processMessage(ctx, msg) {
 	case outcomeParked:
@@ -492,6 +508,7 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 		c.storeOffsets([]*Message{msg})
 	case outcomeBlocked:
 		c.blockMessages(ctx, []*Message{msg})
+	case outcomeInterrupted: // nothing stored, nothing paused
 	}
 }
 
@@ -528,9 +545,10 @@ func (c *Consumer) addToBatch(ctx context.Context, msg *Message) {
 }
 
 // processBatch processes the current batch and reports whether the batch
-// parked or blocked. Whole-batch semantics: if ANY message is unparkable,
-// nothing is stored and the whole batch blocks (everything is re-delivered;
-// duplicates of the successes are what ConsumerWithIdempotencyKey is for).
+// parked, blocked or was interrupted by shutdown. Whole-batch semantics: if ANY
+// message is unparkable, nothing is stored and the whole batch blocks
+// (everything is re-delivered; duplicates of the successes are what
+// ConsumerWithIdempotencyKey is for).
 func (c *Consumer) processBatch(ctx context.Context) outcome {
 	c.batchMu.Lock()
 	if len(c.batch) == 0 {
@@ -567,6 +585,13 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 		if endSpan != nil {
 			endSpan(processingErr)
 		}
+	}
+
+	// A handler error after the context ended is shutdown interrupting the
+	// batch, not a failure: nothing is stored, blocked or recorded, and the
+	// whole batch is redelivered after the restart.
+	if processingErr != nil && ctx.Err() != nil {
+		return outcomeInterrupted
 	}
 
 	// Batch handler error: only the messages the handler saw go to the error
@@ -765,12 +790,15 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 }
 
 // outcome is what processMessage/processBatch report to the poll loop: the
-// message(s) parked (offset may be stored) or blocked (partition must pause).
+// message(s) parked (offset may be stored), blocked (partition must pause), or
+// were interrupted by shutdown (neither: nothing is stored or paused, and the
+// message(s) are redelivered after the restart).
 type outcome int
 
 const (
-	outcomeParked  outcome = iota // offset may be stored — message is durably dealt with
-	outcomeBlocked                // unparkable — partition must block and retry
+	outcomeParked      outcome = iota // offset may be stored — message is durably dealt with
+	outcomeBlocked                    // unparkable — partition must block and retry
+	outcomeInterrupted                // shutdown cut the handler short — leave unstored
 )
 
 // ignoreNoOffset maps librdkafka's "no offset stored" (nothing to commit) to nil

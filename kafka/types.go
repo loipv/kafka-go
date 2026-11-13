@@ -153,7 +153,9 @@ type GroupedBatchHandler func(ctx context.Context, groups []GroupedBatch) error
 // may advance) and the DLQ is not used. Returning an error defers to the DLQ
 // or, without one, to blocking the partition. In batch mode it is called once
 // for each message of the failed batch. With SkipOnMaxRetries the message is
-// parked whatever it returns.
+// parked whatever it returns. It is not called for a message or batch whose
+// handling was interrupted by shutdown (the Start context ended, or Close was
+// called during a retry wait); that message is redelivered instead.
 type ErrorHandler func(ctx context.Context, msg *Message, err error) error
 
 // IdempotencyKeyFunc returns the idempotency key of a message; set it with

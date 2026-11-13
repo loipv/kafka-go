@@ -888,3 +888,142 @@ func TestConsumer_PauseResume(t *testing.T) {
 		t.Errorf("after Resume got %q, want held", msgs[0].Value)
 	}
 }
+
+// shutdownMidHandler runs one consumer with a DLQ topic and an error handler
+// that records its calls and claims every message, registers the handler set
+// by register, produces n messages and, once the handler has started, cancels
+// the Start context and closes the consumer. It returns the error handler's
+// call count and the DLQ topic.
+func shutdownMidHandler(t *testing.T, mc *ckafka.MockCluster, topic, group string, n int,
+	opts []ConsumerOption, register func(c *Consumer, started chan<- struct{})) (errHandlerCalls int32, dlqTopic string) {
+	t.Helper()
+	dlqTopic = uniqueTopic(t, mc, 1)
+	var calls atomic.Int32
+	c, err := NewConsumer(append(fastAtLeastOnce(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic}),
+		// Short session: the mock coordinator completes the next member's join
+		// only after this one's session expires.
+		ConsumerWithSessionTimeout(6*time.Second), ConsumerWithHeartbeatInterval(2*time.Second),
+		ConsumerWithErrorHandler(func(context.Context, *Message, error) error {
+			calls.Add(1)
+			return nil // would claim the message: park it and move on
+		}),
+	), opts...)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	started := make(chan struct{}, 1)
+	register(c, started)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Start(ctx) }()
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	for i := range n {
+		if err := p.Produce(context.Background(), topic, &Message{Value: []byte{byte('0' + i)}}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	select {
+	case <-started:
+	case <-time.After(15 * time.Second):
+		t.Fatal("handler never started")
+	}
+	cancel()
+	if err := c.Close(context.Background()); err != nil { // waits for the poll loop to exit
+		t.Fatalf("Close: %v", err)
+	}
+	return calls.Load(), dlqTopic
+}
+
+// assertRedelivered starts a second consumer in group with a succeeding
+// handler and asserts it receives n messages: the shutdown left them unstored.
+func assertRedelivered(t *testing.T, mc *ckafka.MockCluster, topic, group string, n int) {
+	t.Helper()
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithSessionTimeout(6*time.Second), ConsumerWithHeartbeatInterval(2*time.Second))...)
+	if err != nil {
+		t.Fatalf("NewConsumer (second): %v", err)
+	}
+	got := make(chan *Message, n+4)
+	c.OnMessage(func(_ context.Context, m *Message) error { got <- m; return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer c.Close(context.Background())
+	defer cancel()
+	go func() { _ = c.Start(ctx) }()
+	for i, m := range recvMessages(t, got, n, 20*time.Second) {
+		if m.Offset != int64(i) {
+			t.Errorf("redelivered message %d has offset %d, want %d", i, m.Offset, i)
+		}
+	}
+}
+
+// A context-honouring handler interrupted by shutdown is not a handler
+// failure: the error handler and the DLQ are not invoked, nothing is stored,
+// and the message is redelivered to the group's next consumer.
+func TestConsumer_ShutdownMidHandlerDoesNotParkOrDeadLetter(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+
+	calls, dlqTopic := shutdownMidHandler(t, mc, topic, group, 1, nil, func(c *Consumer, started chan<- struct{}) {
+		c.OnMessage(func(ctx context.Context, _ *Message) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+
+	if calls != 0 {
+		t.Errorf("error handler called %d times, want 0: shutdown is not a handler failure", calls)
+	}
+	if n := topicHighWatermark(t, mc.BootstrapServers(), dlqTopic); n != 0 {
+		t.Errorf("DLQ high watermark = %d, want 0", n)
+	}
+	if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 0 {
+		t.Errorf("committed offset = %d, want nothing committed", off)
+	}
+	assertRedelivered(t, mc, topic, group, 1)
+}
+
+// Batch mode: a batch interrupted by shutdown is neither parked nor
+// dead-lettered; the whole batch is redelivered.
+func TestConsumer_ShutdownMidBatchDoesNotParkOrDeadLetter(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+
+	opts := []ConsumerOption{ConsumerWithBatchSize(3), ConsumerWithBatchTimeout(time.Hour)}
+	calls, dlqTopic := shutdownMidHandler(t, mc, topic, group, 3, opts, func(c *Consumer, started chan<- struct{}) {
+		c.OnBatch(func(ctx context.Context, _ []*Message) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+
+	if calls != 0 {
+		t.Errorf("error handler called %d times, want 0: shutdown is not a handler failure", calls)
+	}
+	if n := topicHighWatermark(t, mc.BootstrapServers(), dlqTopic); n != 0 {
+		t.Errorf("DLQ high watermark = %d, want 0", n)
+	}
+	if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 0 {
+		t.Errorf("committed offset = %d, want nothing committed", off)
+	}
+	assertRedelivered(t, mc, topic, group, 3)
+}
