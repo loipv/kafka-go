@@ -273,10 +273,12 @@ func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 // The memory is in-process only: it is lost on restart or when a partition
 // moves to another instance, and it grows with the number of distinct keys seen
 // within one TTL (see ConsumerWithIdempotencyTTL). A key is recorded only after
-// the handler succeeded; the keys of a failed batch are not recorded, and the
-// whole batch is redelivered unfiltered, so real duplicate protection for
-// failed batches belongs in the handler. Treat it as best-effort
-// de-duplication, not exactly-once.
+// the handler succeeded; the keys of a failed batch are not recorded. If that
+// batch is redelivered, messages whose keys were recorded by earlier successful
+// handling are still filtered, but the rest come back, so real duplicate
+// protection for failed batches belongs in the handler. (With a DLQ, or an
+// error handler that claims the messages, a failed batch is not redelivered at
+// all.) Treat it as best-effort de-duplication, not exactly-once.
 func ConsumerWithIdempotencyKey(fn IdempotencyKeyFunc) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.IdempotencyKey = fn

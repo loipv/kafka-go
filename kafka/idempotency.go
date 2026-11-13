@@ -7,9 +7,11 @@ import (
 
 // idempotencyStore remembers processed idempotency keys for one TTL. It is
 // per-process memory only: it is lost on restart or when a partition is
-// rebalanced to another instance, a failed batch is redelivered whole and
-// unfiltered, and memory grows with the number of distinct keys seen within
-// one TTL.
+// rebalanced to another instance, and memory grows with the number of distinct
+// keys seen within one TTL. The keys of a failed batch are not recorded: if
+// the batch is redelivered, only messages whose keys earlier successful
+// handling recorded are filtered (with a DLQ or a claiming error handler the
+// batch is not redelivered at all).
 //
 // ponytail: unbounded map, one write lock per sweep — cap with an LRU or move to an external store if key volume per TTL gets large
 type idempotencyStore struct {

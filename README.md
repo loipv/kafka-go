@@ -480,7 +480,7 @@ This is a best-effort filter, not exactly-once processing. Its limits:
 
 - The memory is in-process only. It is lost on restart and when a partition moves to another instance.
 - It holds one entry per distinct key seen within one TTL, so memory grows with key volume times TTL.
-- A key is recorded only after the handler succeeded. In batch modes duplicates are removed before the handler is called (including repeats inside the same batch), but the keys of a failed batch are not recorded and the whole batch is redelivered unfiltered.
+- A key is recorded only after the handler succeeded. In batch modes duplicates are removed before the handler is called (including repeats inside the same batch), but the keys of a failed batch are not recorded. If that batch is redelivered, only messages whose keys earlier successful handling recorded are filtered; with a DLQ or an error handler that claims the messages, the batch is not redelivered at all.
 
 Real duplicate protection belongs in the handler, for example a unique key in the database that makes a repeated write a no-op.
 
