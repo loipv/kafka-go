@@ -391,8 +391,10 @@ func TestBlockedPartition_UserResumeDoesNotBypassBackoff(t *testing.T) {
 		ConsumerWithFromBeginning(true),
 		ConsumerWithAutoCommit(true),
 		ConsumerWithAutoCommitInterval(200*time.Millisecond),
-		// Handler tried twice 4s apart, then the partition blocks for 4s.
-		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 4 * time.Second}),
+		// Handler tried twice 6s apart, then the partition blocks for 6s: the
+		// no-call window below (about 2s with the pause/resume round trips)
+		// leaves a 4s margin before the block's own backoff elapses.
+		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 6 * time.Second}),
 	)
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
@@ -416,7 +418,7 @@ func TestBlockedPartition_UserResumeDoesNotBypassBackoff(t *testing.T) {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	waitFor(t, 20*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		return len(c.Metrics().BlockedPartitions) > 0
 	}, "partition never reported blocked")
 	n := calls.Load()
