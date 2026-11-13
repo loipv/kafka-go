@@ -215,7 +215,7 @@ func main() {
 	// Pick a variant: default single-message; EXAMPLE=batch or EXAMPLE=grouped
 	switch os.Getenv("EXAMPLE") {
 	case "batch":
-		example2BatchProcessing(brokers)
+		example2Batch(brokers)
 	case "grouped":
 		example3GroupedBatch(brokers)
 	default:
@@ -255,12 +255,11 @@ func example1SingleMessage(brokers string) {
 	_ = consumer.Close(context.Background())
 }
 
-func example2BatchProcessing(brokers string) {
+func example2Batch(brokers string) {
 	consumer, err := kafka.NewConsumer(
 		kafka.ConsumerWithBrokers(brokers),
 		kafka.ConsumerWithGroupID("typed-batch-consumer"),
 		kafka.ConsumerWithTopics("orders"),
-		kafka.ConsumerWithBatchProcessing(true),
 		kafka.ConsumerWithBatchSize(100),
 	)
 	if err != nil {
@@ -295,9 +294,7 @@ func example3GroupedBatch(brokers string) {
 		kafka.ConsumerWithBrokers(brokers),
 		kafka.ConsumerWithGroupID("typed-grouped-consumer"),
 		kafka.ConsumerWithTopics("orders"),
-		kafka.ConsumerWithBatchProcessing(true),
 		kafka.ConsumerWithBatchSize(100),
-		kafka.ConsumerWithGroupByKey(true), // Group by message key (customer ID)
 	)
 	if err != nil {
 		log.Fatal(err)

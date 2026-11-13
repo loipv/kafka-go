@@ -127,19 +127,29 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 	return kc, nil
 }
 
-// OnMessage registers a handler for single messages
+// OnMessage registers a handler for single messages. Only one handler is
+// kept: a later On* registration replaces the earlier one.
 func (c *Consumer) OnMessage(handler MessageHandler) {
-	c.messageHandler = handler
+	c.messageHandler, c.batchHandler, c.groupedBatchHandler = handler, nil, nil
 }
 
-// OnBatch registers a handler for batch messages
+// OnBatch registers a handler for batch messages and turns batch mode on.
+// Only one handler is kept: a later On* registration replaces the earlier one.
 func (c *Consumer) OnBatch(handler BatchHandler) {
-	c.batchHandler = handler
+	c.messageHandler, c.batchHandler, c.groupedBatchHandler = nil, handler, nil
 }
 
-// OnGroupedBatch registers a handler for key-grouped batches
+// OnGroupedBatch registers a handler for key-grouped batches and turns batch
+// mode on. Only one handler is kept: a later On* registration replaces the
+// earlier one.
 func (c *Consumer) OnGroupedBatch(handler GroupedBatchHandler) {
-	c.groupedBatchHandler = handler
+	c.messageHandler, c.batchHandler, c.groupedBatchHandler = nil, nil, handler
+}
+
+// batchMode reports whether messages are delivered in batches, which is the
+// case exactly when a batch or grouped batch handler is registered.
+func (c *Consumer) batchMode() bool {
+	return c.batchHandler != nil || c.groupedBatchHandler != nil
 }
 
 // Start starts consuming messages (blocking)
@@ -167,8 +177,8 @@ func (c *Consumer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to subscribe to topics: %w", err)
 	}
 
-	// Start batch flush ticker if batch processing is enabled
-	if c.config.BatchProcessing {
+	// Start batch flush ticker if a batch handler is registered
+	if c.batchMode() {
 		go c.batchFlushLoop(ctx)
 	}
 
@@ -201,7 +211,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 			message := c.convertMessage(msg)
 
 			// Process message
-			if c.config.BatchProcessing {
+			if c.batchMode() {
 				c.addToBatch(ctx, message)
 			} else {
 				c.deliver(ctx, message)
@@ -239,7 +249,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 	}
 
 	// Process remaining batch
-	if c.config.BatchProcessing {
+	if c.batchMode() {
 		c.processBatch(ctx)
 	}
 
@@ -390,21 +400,6 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 	}
 }
 
-// invokeHandler dispatches a single message to whichever handler the user
-// registered, wrapping it into a batch or grouped batch as needed. Start
-// rejects a handler-less consumer, so exactly one branch fires.
-func (c *Consumer) invokeHandler(ctx context.Context, msg *Message) error {
-	switch {
-	case c.messageHandler != nil:
-		return c.messageHandler(ctx, msg)
-	case c.batchHandler != nil:
-		return c.batchHandler(ctx, []*Message{msg})
-	case c.groupedBatchHandler != nil:
-		return c.groupedBatchHandler(ctx, []GroupedBatch{{Key: string(msg.Key), Messages: []*Message{msg}}})
-	}
-	return nil
-}
-
 // executeWithRetry executes the handler with retry logic. The returned
 // attempts count handler invocations (1 = first try, no retry).
 func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, error) {
@@ -434,7 +429,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 	delay := initialInterval
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err := c.invokeHandler(ctx, msg)
+		err := c.messageHandler(ctx, msg)
 		if err == nil {
 			return attempt + 1, nil
 		}
@@ -517,21 +512,11 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 		ctx, endSpan = c.tracer.StartBatchConsumerSpan(ctx, c.config.GroupID, batch)
 	}
 
-	// Process based on configuration
 	var processingErr error
-	blocked := false
-	if c.config.GroupByKey && c.groupedBatchHandler != nil {
-		groups := c.groupByKey(batch)
-		processingErr = c.groupedBatchHandler(ctx, groups)
-	} else if c.batchHandler != nil {
+	if c.groupedBatchHandler != nil {
+		processingErr = c.groupedBatchHandler(ctx, c.groupByKey(batch))
+	} else {
 		processingErr = c.batchHandler(ctx, batch)
-	} else if c.messageHandler != nil {
-		// Fall back to processing messages individually
-		for _, msg := range batch {
-			if c.processMessage(ctx, msg) == outcomeBlocked {
-				blocked = true
-			}
-		}
 	}
 
 	// End span with error if any
@@ -540,8 +525,9 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 	}
 
 	// Batch handler error
+	blocked := false
 	if processingErr != nil {
-		blocked = c.handleBatchError(ctx, processingErr, batch) || blocked
+		blocked = c.handleBatchError(ctx, processingErr, batch)
 	}
 
 	if blocked {

@@ -106,7 +106,7 @@ func TestBatchFlushByTimeout(t *testing.T) {
 	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
 		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
 		ConsumerWithFromBeginning(true),
-		ConsumerWithBatchProcessing(true), ConsumerWithBatchSize(10),
+		ConsumerWithBatchSize(10),
 		ConsumerWithBatchTimeout(300*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
@@ -284,8 +284,8 @@ func TestOnGroupedBatchPreservesFirstSeenKeyOrder(t *testing.T) {
 		ConsumerWithBrokers(mc.BootstrapServers()),
 		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
 		ConsumerWithFromBeginning(true),
-		ConsumerWithBatchProcessing(true), ConsumerWithBatchSize(10),
-		ConsumerWithBatchTimeout(300*time.Millisecond), ConsumerWithGroupByKey(true),
+		ConsumerWithBatchSize(10),
+		ConsumerWithBatchTimeout(300*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)

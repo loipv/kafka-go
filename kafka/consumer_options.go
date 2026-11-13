@@ -22,10 +22,8 @@ type ConsumerConfig struct {
 	RebalanceTimeout  time.Duration
 
 	// Batch processing
-	BatchProcessing bool
-	BatchSize       int
-	BatchTimeout    time.Duration
-	GroupByKey      bool
+	BatchSize    int
+	BatchTimeout time.Duration
 
 	// Idempotency
 	IdempotencyKey IdempotencyKeyFunc
@@ -137,13 +135,6 @@ func ConsumerWithRebalanceTimeout(timeout time.Duration) ConsumerOption {
 	}
 }
 
-// ConsumerWithBatchProcessing enables batch processing
-func ConsumerWithBatchProcessing(enabled bool) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.BatchProcessing = enabled
-	}
-}
-
 // ConsumerWithBatchSize sets the batch size
 func ConsumerWithBatchSize(size int) ConsumerOption {
 	return func(c *ConsumerConfig) {
@@ -155,13 +146,6 @@ func ConsumerWithBatchSize(size int) ConsumerOption {
 func ConsumerWithBatchTimeout(timeout time.Duration) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.BatchTimeout = timeout
-	}
-}
-
-// ConsumerWithGroupByKey enables key-based grouping
-func ConsumerWithGroupByKey(enabled bool) ConsumerOption {
-	return func(c *ConsumerConfig) {
-		c.GroupByKey = enabled
 	}
 }
 

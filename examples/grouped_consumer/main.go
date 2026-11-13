@@ -31,11 +31,9 @@ func main() {
 		kafka.ConsumerWithGroupID("order-group-processors"),
 		kafka.ConsumerWithTopics("orders"),
 
-		// Enable batch processing with key grouping
-		kafka.ConsumerWithBatchProcessing(true),
+		// Batch size/timeout (key grouping follows the OnGroupedBatch handler)
 		kafka.ConsumerWithBatchSize(50),
 		kafka.ConsumerWithBatchTimeout(5*time.Second),
-		kafka.ConsumerWithGroupByKey(true), // Enable key grouping
 
 		// Use cooperative sticky assignor for better rebalancing
 		kafka.ConsumerWithPartitionAssignor(kafka.AssignorCooperativeSticky),

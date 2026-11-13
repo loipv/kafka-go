@@ -32,8 +32,7 @@ func main() {
 		kafka.ConsumerWithGroupID("order-processors"),
 		kafka.ConsumerWithTopics("orders"),
 
-		// Batch processing
-		kafka.ConsumerWithBatchProcessing(true),
+		// Batch size/timeout (batch mode follows the OnBatch handler)
 		kafka.ConsumerWithBatchSize(10),
 		kafka.ConsumerWithBatchTimeout(3*time.Second),
 
