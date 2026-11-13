@@ -8,9 +8,29 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
+
+// maxDLQErrorBytes caps the x-dlq-error-message header value.
+const maxDLQErrorBytes = 1024
+
+// truncateUTF8 returns the longest prefix of s that is at most max bytes and
+// ends on a rune boundary. It returns s unchanged when it already fits.
+func truncateUTF8(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
 
 // dlqService handles Dead Letter Queue operations
 type dlqService struct {
@@ -68,7 +88,7 @@ func (s *dlqService) produceToDLQ(ctx context.Context, msg *Message, err error, 
 	out.SetHeader("x-dlq-timestamp", appendTime(nil, time.Now()))
 	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // #9: the real count
 	if s.config.IncludeErrorInfo && err != nil {
-		out.SetHeader("x-dlq-error-message", []byte(err.Error()))
+		out.SetHeader("x-dlq-error-message", []byte(truncateUTF8(err.Error(), maxDLQErrorBytes)))
 	}
 
 	dlqTopic := s.config.Topic

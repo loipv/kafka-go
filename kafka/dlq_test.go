@@ -3,8 +3,10 @@ package kafka
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestIdempotencyStore(t *testing.T) {
@@ -129,5 +131,18 @@ func TestDLQProducerConfig(t *testing.T) {
 	cm = dlqProducerConfig(connConfig{Brokers: []string{"b:9092"}, Raw: map[string]any{"message.timeout.ms": 5000}})
 	if cm["message.timeout.ms"] != 5000 {
 		t.Errorf("raw override lost: %v", cm["message.timeout.ms"])
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	if got := truncateUTF8("short", 1024); got != "short" {
+		t.Errorf("short string changed: %q", got)
+	}
+	if got := truncateUTF8(strings.Repeat("a", 2000), 1024); len(got) != 1024 {
+		t.Errorf("len = %d, want 1024", len(got))
+	}
+	got := truncateUTF8(strings.Repeat("a", 1023)+"é"+"tail", 1024) // "é" is 2 bytes, straddles the limit
+	if len(got) != 1023 || !utf8.ValidString(got) {
+		t.Errorf("len = %d valid = %v, want 1023 bytes of valid UTF-8", len(got), utf8.ValidString(got))
 	}
 }

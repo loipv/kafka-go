@@ -61,7 +61,9 @@ type ConsumerConfig struct {
 
 // DLQConfig holds Dead Letter Queue configuration
 type DLQConfig struct {
-	Topic            string
+	Topic string
+	// IncludeErrorInfo adds the handler error text as the x-dlq-error-message
+	// header. The text may contain sensitive data; it is truncated to 1024 bytes.
 	IncludeErrorInfo bool
 
 	// Separate DLQ cluster. Empty Brokers inherits the consumer's connection
