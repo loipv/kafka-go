@@ -29,7 +29,9 @@ type HealthChecker struct {
 // (required, else ErrBrokersRequired), ProducerWithClientID, ProducerWithSSL,
 // ProducerWithSASL, ProducerWithRawConfig, the two timeouts and
 // ProducerWithLogger, with the same defaults as NewProducer. Options that only
-// shape produced messages have no effect on a health checker.
+// shape produced messages have no effect on a health checker. The checker
+// never asks the broker to auto-create a topic (allow.auto.create.topics is
+// forced to false, whatever ProducerWithRawConfig says).
 func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	cfg := newDefaultProducerConfig()
 	for _, opt := range opts {
@@ -40,6 +42,10 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	}
 	warnPlaintextSASL(cfg.Logger, cfg.conn())
 	cfgMap := buildProducerConfig(cfg)
+	// A producer handle asks the broker to auto-create the topics it requests
+	// metadata for; a probe must never create what it checks. Set after the
+	// Raw merge so raw config cannot turn it back on.
+	cfgMap["allow.auto.create.topics"] = false
 	p, err := ckafka.NewProducer(&cfgMap)
 	if err != nil {
 		return nil, fmt.Errorf("create health producer: %w", err)
@@ -297,9 +303,10 @@ func (h *HealthChecker) CheckConsumerLag(ctx context.Context, groupID string, ma
 // "partitionCount" and "partitions", a list of maps with "id", "leader" (the
 // leader broker id), "replicas" (the replica count) and "isrs" (the in-sync
 // replica count) for each partition. When DOWN (metadata failure, unknown topic
-// or topic error), Error says why and Details holds "topic". The context's
-// deadline bounds the metadata request; the 10-second default applies without
-// one.
+// or topic error), Error says why and Details holds "topic". The check never
+// creates the topic, even on a broker with auto.create.topics.enable: a
+// missing topic stays missing and is reported DOWN. The context's deadline
+// bounds the metadata request; the 10-second default applies without one.
 func (h *HealthChecker) CheckTopic(ctx context.Context, topic string) *HealthResult {
 	// Check if context is already cancelled
 	select {

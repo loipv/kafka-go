@@ -132,3 +132,25 @@ func TestHealth_CancelledContext(t *testing.T) {
 		}
 	}
 }
+
+// Probing a topic must never create it: the checker's metadata request runs on
+// a producer handle, where librdkafka would otherwise ask for auto-creation.
+func TestHealth_CheckTopicMissingTopicIsDown(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	hc, err := NewHealthChecker(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewHealthChecker: %v", err)
+	}
+	defer hc.Close()
+
+	topic := uniqueGroupName(t) // a name no test created
+	for i := range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		res := hc.CheckTopic(ctx, topic)
+		cancel()
+		if res.Status != HealthStatusDown || res.Error == "" {
+			t.Fatalf("CheckTopic(missing) call %d = %s (%q), want DOWN with an error", i+1, res.Status, res.Error)
+		}
+	}
+}
