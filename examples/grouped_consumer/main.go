@@ -54,6 +54,8 @@ func main() {
 				var order Order
 				if err := json.Unmarshal(msg.Value, &order); err != nil {
 					log.Printf("Failed to unmarshal order: %v", err)
+					// A skipped message is acknowledged with the batch and so lost;
+					// returning an error instead fails (and redelivers) the whole batch.
 					continue
 				}
 				orders = append(orders, order)
