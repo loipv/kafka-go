@@ -394,7 +394,8 @@ func ConsumerWithErrorHandler(handler ErrorHandler) ConsumerOption {
 //
 // The revoke that Close triggers runs after the consumer is marked closed, so
 // Consumer.Commit called from the callback then returns ErrConsumerClosed. The
-// library still commits the stored offsets of parked messages itself.
+// stored offsets of parked messages are still committed (with auto commit off,
+// by the library's revoke handling, so only when the callback returns nil).
 func ConsumerWithRebalanceCallback(callback RebalanceCallback) ConsumerOption {
 	return func(c *ConsumerConfig) {
 		c.RebalanceCallback = callback
