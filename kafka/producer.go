@@ -185,9 +185,12 @@ func (p *Producer) Close() error {
 		return nil
 	}
 
-	close(p.done)
-	p.wg.Wait() // let the report reader drain before closing the producer under it (#30)
+	// Flush while the reader goroutine is still consuming Events(): Len()
+	// counts unread delivery reports, so stopping the reader first would
+	// stall Flush for the full timeout and drop async delivery failures.
 	p.producer.Flush(10000)
+	close(p.done)
+	p.wg.Wait() // let the report reader exit before closing the producer under it (#30)
 	p.producer.Close()
 	return nil
 }
