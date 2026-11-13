@@ -1120,3 +1120,89 @@ func TestConsumer_RestartAfterInterruptRedelivers(t *testing.T) {
 		})
 	}
 }
+
+// Close interrupting a retry wait, with the Start context still live, is
+// shutdown too: the message is reported interrupted and is not offered to the
+// error handler.
+func TestConsumer_ProcessMessageInterruptedByCloseSkipsErrorHandler(t *testing.T) {
+	calls := 0
+	c := &Consumer{
+		config: &ConsumerConfig{
+			ErrorHandler: func(context.Context, *Message, error) error { calls++; return nil },
+		},
+		retry:   normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
+		done:    make(chan struct{}),
+		logger:  slog.New(slog.DiscardHandler),
+		metrics: newMetricsCollector(),
+	}
+	c.after = func(time.Duration) <-chan time.Time {
+		close(c.done) // Close is called while the retry wait is in progress
+		return make(chan time.Time)
+	}
+	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }
+
+	if got := c.processMessage(context.Background(), &Message{Topic: "t"}); got != outcomeInterrupted {
+		t.Errorf("processMessage() = %v, want outcomeInterrupted", got)
+	}
+	if calls != 0 {
+		t.Errorf("error handler called %d times, want 0", calls)
+	}
+}
+
+// The final batch flush in Close runs with Close's ctx. When that ctx has ended
+// and the batch handler then fails, the batch is interrupted, not failed: the
+// error handler is not called, nothing is stored and the batch is redelivered.
+func TestConsumer_CloseFlushWithEndedContextLeavesBatchUnstored(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+	var errCalls atomic.Int32
+	c, err := NewConsumer(fastAtLeastOnce(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithSessionTimeout(6*time.Second), ConsumerWithHeartbeatInterval(2*time.Second),
+		ConsumerWithBatchSize(10), ConsumerWithBatchTimeout(time.Hour),
+		ConsumerWithErrorHandler(func(context.Context, *Message, error) error {
+			errCalls.Add(1)
+			return nil // would claim the message: park it and move on
+		}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(ctx context.Context, _ []*Message) error { return ctx.Err() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Start(ctx) }()
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	for i := range 2 {
+		if err := p.Produce(context.Background(), topic, &Message{Value: []byte{byte('0' + i)}}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	waitFor(t, 15*time.Second, func() bool {
+		c.batchMu.Lock()
+		defer c.batchMu.Unlock()
+		return len(c.batch) == 2
+	}, "the two messages never reached the pending batch")
+
+	cancel()
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if err := c.Close(ended); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if n := errCalls.Load(); n != 0 {
+		t.Errorf("error handler called %d times, want 0: shutdown is not a handler failure", n)
+	}
+	if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 0 {
+		t.Errorf("committed offset = %d, want nothing committed", off)
+	}
+	assertRedelivered(t, mc, topic, group, 2)
+}
