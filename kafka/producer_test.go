@@ -227,3 +227,20 @@ func TestProducer_CloseWarnsWhenFlushTimesOut(t *testing.T) {
 		t.Errorf("log = %q, want a Warn with remaining=1", got)
 	}
 }
+
+func TestProducer_RequiresBrokers(t *testing.T) {
+	for name, opts := range map[string][]ProducerOption{
+		"no options":    nil,
+		"empty brokers": {ProducerWithBrokers()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := NewProducer(opts...)
+			if !errors.Is(err, ErrBrokersRequired) {
+				if p != nil {
+					_ = p.Close()
+				}
+				t.Fatalf("NewProducer() error = %v, want %v", err, ErrBrokersRequired)
+			}
+		})
+	}
+}

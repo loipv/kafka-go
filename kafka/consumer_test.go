@@ -795,3 +795,28 @@ func TestConsumer_IgnoreNoOffset(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumer_RequiresBrokersGroupAndTopics(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []ConsumerOption
+		want error
+	}{
+		{"no options", nil, ErrBrokersRequired},
+		{"empty brokers", []ConsumerOption{ConsumerWithBrokers(), ConsumerWithGroupID("g"), ConsumerWithTopics("t")}, ErrBrokersRequired},
+		{"missing group id", []ConsumerOption{ConsumerWithBrokers("127.0.0.1:1"), ConsumerWithTopics("t")}, ErrGroupIDRequired},
+		{"missing topics", []ConsumerOption{ConsumerWithBrokers("127.0.0.1:1"), ConsumerWithGroupID("g")}, ErrTopicsRequired},
+		{"empty topics", []ConsumerOption{ConsumerWithBrokers("127.0.0.1:1"), ConsumerWithGroupID("g"), ConsumerWithTopics()}, ErrTopicsRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := NewConsumer(tt.opts...)
+			if !errors.Is(err, tt.want) {
+				if c != nil {
+					_ = c.Close(context.Background())
+				}
+				t.Fatalf("NewConsumer() error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
