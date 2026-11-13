@@ -376,7 +376,8 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	if c.idempotencyStore != nil && c.config.IdempotencyKey != nil {
 		idempotencyKey = c.config.IdempotencyKey(msg)
 		if idempotencyKey != "" && c.idempotencyStore.isDuplicate(idempotencyKey) {
-			c.logger.Debug("skipping duplicate message", "key", idempotencyKey)
+			c.logger.Debug("skipping duplicate message",
+				"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset)
 			return outcomeParked
 		}
 	}

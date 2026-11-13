@@ -1,9 +1,11 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -701,5 +703,33 @@ func BenchmarkCommitOffsets_Single(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = commitOffsets(msgs)
+	}
+}
+
+// Message keys, values and headers must never reach the logs, and an
+// idempotency key is derived from them.
+func TestProcessMessage_DuplicateLogOmitsIdempotencyKey(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	s := newIdempotencyStore(time.Hour)
+	defer s.close()
+	s.add("user-4711")
+	c := &Consumer{
+		logger:           logger,
+		config:           &ConsumerConfig{IdempotencyKey: func(m *Message) string { return string(m.Key) }},
+		idempotencyStore: s,
+	}
+	out := c.processMessage(context.Background(), &Message{Key: []byte("user-4711"), Topic: "orders", Partition: 2, Offset: 9})
+	if out != outcomeParked {
+		t.Fatalf("outcome = %v, want parked", out)
+	}
+	got := buf.String()
+	if strings.Contains(got, "user-4711") {
+		t.Errorf("log leaks the idempotency key: %q", got)
+	}
+	for _, want := range []string{"topic=orders", "partition=2", "offset=9"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log %q missing %s", got, want)
+		}
 	}
 }
