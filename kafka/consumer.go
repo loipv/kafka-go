@@ -824,7 +824,10 @@ func ignoreNoOffset(err error) error {
 // responsible for committing and must call Commit itself; the library still
 // commits stored offsets when partitions are revoked in a rebalance. With auto
 // commit on it is optional, for committing sooner than the auto commit
-// interval. It returns ErrConsumerClosed once the consumer has been closed.
+// interval. It returns ErrConsumerClosed once the consumer has been closed,
+// and also from a rebalance callback that runs while Close shuts the client
+// down (the revoke during Close happens after the client is marked closed);
+// the library still commits the stored offsets itself in that case.
 func (c *Consumer) Commit(msgs ...*Message) error {
 	if c.handleClosed.Load() {
 		return ErrConsumerClosed
