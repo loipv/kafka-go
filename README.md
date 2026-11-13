@@ -178,7 +178,7 @@ if err := consumer.Close(closeCtx); err != nil {
 | Method | Behaviour |
 |---|---|
 | `Produce(ctx, topic, msg)` | Sends one message and blocks until its delivery report arrives. Returns the delivery error if the broker did not acknowledge it. If `ctx` ends first it returns the context's error, and the message may still be delivered afterwards. |
-| `ProduceBatch(ctx, topic, msgs)` | Sends all messages and blocks until every report has arrived. Returns `nil` for an empty batch or when all were acknowledged, otherwise the `errors.Join` of every failure (use `errors.Is` / `errors.As`). The messages the error does not name were delivered. |
+| `ProduceBatch(ctx, topic, msgs)` | Sends all messages and blocks until every report has arrived. Returns `nil` for an empty batch or when all were acknowledged, otherwise the `errors.Join` of every failure (use `errors.Is` / `errors.As`). The joined errors carry only topic and partition, so an error does not say which messages failed: treat each message's delivery as unknown (some may have been delivered). |
 | `ProduceAsync(topic, msg)` | Queues the message and returns at once. A `nil` return only means "queued". Delivery failures go to the handler set with `ProducerWithDeliveryErrorHandler`, or are logged at error level when there is none. |
 | `Flush(timeout)` | Waits up to `timeout` for every queued message, `ProduceAsync` ones included. Returns an error stating how many are still queued, or `nil`. |
 | `Close()` | Flushes for up to 10 seconds, logs a warning with the number of messages still undelivered (they are lost), then closes. Safe to call more than once; always returns `nil`. |
