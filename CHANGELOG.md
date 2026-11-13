@@ -107,6 +107,13 @@ related). Delivery stays at-least-once.
   and `ErrInvalidBatchTimeout` (non-positive batch settings).
 - Tracing no longer records the message key as a span attribute unless
   `TracingConfig.IncludeMessageKey` is set (see Security).
+- `NewConsumer` returns an error naming the cause (the retry budget, the DLQ
+  delivery timeout or `ConsumerWithRebalanceTimeout`) when `max.poll.interval.ms`
+  would exceed librdkafka's 24-hour limit, instead of librdkafka's bare range
+  error. The value is not clamped.
+- `NewConsumer` logs a warning when `DLQConfig.SSL`, `SASL` or `Raw` is set
+  without `DLQConfig.Brokers`: those fields are ignored then, and the DLQ uses
+  the consumer's connection. The warning names the fields, never their values.
 - Contributors only: source and test files were reorganised (one concern per
   file, `x_test.go` per `x.go`), CI enforces an 80% coverage floor and doc
   comments on every export, and `CLAUDE.md` documents the conventions.
@@ -134,6 +141,25 @@ related). Delivery stays at-least-once.
   querying; it now stops with a DOWN result.
 - A DLQ delivery event that was not a message report was counted as a success;
   the message is now treated as unconfirmed (its partition blocks and retries).
+  `Produce` and `ProduceBatch` likewise report such an event as an error.
+- A graceful shutdown was treated as a handler failure. When the `Start` context
+  was cancelled while a handler or a retry wait was in flight (or `Close`
+  interrupted a retry wait), the error handler received `context canceled` and,
+  by returning `nil`, parked a message that was never processed (in batch mode
+  the whole batch), so its offset was committed and the message lost; with a
+  DLQ, healthy messages were written to the DLQ and also redelivered. Such a
+  message or batch is now left unstored and redelivered, and the error handler
+  and the DLQ are not invoked.
+- `Producer.Flush` after `Close` crashed the process (a segmentation fault in
+  librdkafka); it now returns `ErrProducerClosed`.
+- `HealthChecker.CheckTopic` asked the broker to auto-create the topic it
+  probed, so a missing topic was created and reported UP. The health checker
+  never auto-creates topics now; a missing topic is DOWN.
+- `Close` without cancelling the `Start` context could leave `Start` blocked
+  forever when a DLQ delivery wait was in flight and the DLQ was unreachable.
+- `Check` and `CheckTopic` could pass librdkafka a non-positive timeout when the
+  context deadline was about to expire; they now report DOWN with the deadline
+  error.
 
 ### Security
 
@@ -145,7 +171,8 @@ related). Delivery stays at-least-once.
 - `NewProducer`, `NewConsumer` and `NewHealthChecker` log a warning when SASL is
   configured without TLS (credentials would travel unencrypted); the warning
   never includes the username or password. The same applies to a DLQ cluster
-  configured through `DLQConfig`.
+  configured through `DLQConfig`. A raw `security.protocol` is matched in any
+  case (`SASL_PLAINTEXT` warns too).
 - The SASL password is redacted by `SASLConfig` when printed with `%v`, `%+v` or
   `%#v`, when logged through `slog`'s text or JSON handler, and in
   `encoding/json` output (new `String`, `GoString`, `LogValue` and `MarshalJSON`
