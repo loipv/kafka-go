@@ -92,6 +92,11 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		return nil, ErrInvalidBatchTimeout
 	}
 
+	warnPlaintextSASL(config.Logger, config.conn())
+	if config.DLQ != nil && len(config.DLQ.Brokers) > 0 {
+		warnPlaintextSASL(config.Logger, config.dlqConn())
+	}
+
 	// Build kafka config map (connection/auth via the connConfig seam)
 	configMap, err := buildConsumerConfig(config)
 	if err != nil {

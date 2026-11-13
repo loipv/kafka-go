@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,24 @@ func (cc connConfig) configMap() ckafka.ConfigMap {
 		cm[k] = v
 	}
 	return cm
+}
+
+// warnPlaintextSASL logs once when the resolved security.protocol sends SASL
+// credentials without TLS. It decides from the resolved map so a Raw override
+// is honoured, and never logs the username or password.
+func warnPlaintextSASL(l *slog.Logger, cc connConfig) {
+	if cc.configMap()["security.protocol"] != "sasl_plaintext" {
+		return
+	}
+	if l == nil {
+		l = slog.Default()
+	}
+	msg := "SASL credentials are sent without TLS (security.protocol=sasl_plaintext); enable SSL to protect them"
+	if cc.SASL == nil { // protocol forced to sasl_plaintext via Raw
+		l.Warn(msg)
+		return
+	}
+	l.Warn(msg, "mechanism", cc.SASL.Mechanism)
 }
 
 func (c *ProducerConfig) conn() connConfig {

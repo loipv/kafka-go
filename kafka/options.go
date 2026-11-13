@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -41,6 +42,21 @@ type SASLConfig struct {
 	Mechanism string
 	Username  string
 	Password  string
+}
+
+// String redacts the password so printing a SASLConfig (or a config that
+// holds one) never leaks it. Value receiver: covers SASLConfig and *SASLConfig.
+func (s SASLConfig) String() string {
+	return fmt.Sprintf("SASLConfig{Mechanism:%s Username:%s Password:[REDACTED]}", s.Mechanism, s.Username)
+}
+
+// LogValue implements slog.LogValuer with the password redacted.
+func (s SASLConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("mechanism", s.Mechanism),
+		slog.String("username", s.Username),
+		slog.String("password", "[REDACTED]"),
+	)
 }
 
 // RetryConfig holds retry configuration. A zero field uses its default value:

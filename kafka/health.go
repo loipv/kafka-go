@@ -27,6 +27,7 @@ func NewHealthChecker(opts ...ProducerOption) (*HealthChecker, error) {
 	if len(cfg.Brokers) == 0 {
 		return nil, ErrBrokersRequired
 	}
+	warnPlaintextSASL(cfg.Logger, cfg.conn())
 	cfgMap := buildProducerConfig(cfg)
 	p, err := ckafka.NewProducer(&cfgMap)
 	if err != nil {

@@ -1,7 +1,11 @@
 package kafka
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,5 +277,58 @@ func TestDLQTimeout(t *testing.T) {
 				t.Errorf("dlqTimeout() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSASLConfig_RedactsPassword(t *testing.T) {
+	s := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: "s3cret"}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("cfg", "sasl", s)
+	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%v", *s), buf.String()} {
+		if strings.Contains(out, "s3cret") || !strings.Contains(out, "[REDACTED]") {
+			t.Errorf("password leaked or not redacted in %q", out)
+		}
+	}
+}
+
+func TestWarnPlaintextSASL(t *testing.T) {
+	const password = "hunter2-secret"
+	sasl := &SASLConfig{Mechanism: "PLAIN", Username: "u", Password: password}
+	tests := []struct {
+		name string
+		cc   connConfig
+		want bool
+	}{
+		{"sasl without ssl warns", connConfig{Brokers: []string{"b"}, SASL: sasl}, true},
+		{"sasl with ssl is silent", connConfig{Brokers: []string{"b"}, SASL: sasl, SSL: true}, false},
+		{"raw sasl_ssl is silent", connConfig{Brokers: []string{"b"}, SASL: sasl,
+			Raw: map[string]any{"security.protocol": "sasl_ssl"}}, false},
+		{"no sasl is silent", connConfig{Brokers: []string{"b"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			warnPlaintextSASL(slog.New(slog.NewTextHandler(&buf, nil)), tt.cc)
+			if got := strings.Count(buf.String(), "level=WARN"); (got == 1) != tt.want || got > 1 {
+				t.Errorf("warn records = %d, want warned=%v (log: %q)", got, tt.want, buf.String())
+			}
+			if strings.Contains(buf.String(), password) || strings.Contains(buf.String(), "username") {
+				t.Errorf("warning must not contain credentials: %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestWarnPlaintextSASL_NilLogger(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	warnPlaintextSASL(nil, connConfig{Brokers: []string{"b"}, SASL: &SASLConfig{Mechanism: "PLAIN"}})
+	// Raw-forced sasl_plaintext without a SASLConfig must not panic either.
+	warnPlaintextSASL(nil, connConfig{Brokers: []string{"b"}, Raw: map[string]any{"security.protocol": "sasl_plaintext"}})
+	if got := strings.Count(buf.String(), "level=WARN"); got != 2 {
+		t.Errorf("warn records = %d, want 2 (log: %q)", got, buf.String())
 	}
 }

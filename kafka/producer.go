@@ -36,6 +36,8 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 		return nil, ErrBrokersRequired
 	}
 
+	warnPlaintextSASL(config.Logger, config.conn())
+
 	// Build kafka config map (connection/auth via the connConfig seam)
 	configMap := buildProducerConfig(config)
 
