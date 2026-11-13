@@ -89,15 +89,25 @@ func (c *ConsumerConfig) dlqConn() connConfig {
 	return connConfig{Brokers: c.DLQ.Brokers, SSL: c.DLQ.SSL, SASL: c.DLQ.SASL, Raw: c.DLQ.Raw}
 }
 
+// timeoutRaw returns the user's message timeout from raw librdkafka config:
+// message.timeout.ms, or its alias delivery.timeout.ms when that is absent. nil
+// means the user set neither.
+func timeoutRaw(raw map[string]any) any {
+	if v, ok := raw["message.timeout.ms"]; ok {
+		return v
+	}
+	return raw["delivery.timeout.ms"]
+}
+
 // dlqTimeout is how long one DLQ delivery can block the poll loop: 0 without a
-// DLQ, otherwise the DLQ connection's message.timeout.ms (int or numeric
+// DLQ, otherwise the DLQ connection's message.timeout.ms or its alias delivery.timeout.ms (int or numeric
 // string, as librdkafka accepts both) or dlqDeliveryTimeout.
 func (c *ConsumerConfig) dlqTimeout() time.Duration {
 	if c.DLQ == nil {
 		return 0
 	}
 	var ms int
-	switch v := c.dlqConn().Raw["message.timeout.ms"].(type) {
+	switch v := timeoutRaw(c.dlqConn().Raw).(type) {
 	case int:
 		ms = v
 	case string:

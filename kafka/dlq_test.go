@@ -178,6 +178,17 @@ func TestDLQProducerConfig(t *testing.T) {
 	if cm["message.timeout.ms"] != 5000 {
 		t.Errorf("raw override lost: %v", cm["message.timeout.ms"])
 	}
+	// delivery.timeout.ms is a librdkafka alias of message.timeout.ms: the
+	// user's alias must not be shadowed by our default.
+	cm = dlqProducerConfig(connConfig{Brokers: []string{"b:9092"}, Raw: map[string]any{"delivery.timeout.ms": 7000}})
+	if _, ok := cm["message.timeout.ms"]; ok || cm["delivery.timeout.ms"] != 7000 {
+		t.Errorf("alias config = %v, want delivery.timeout.ms=7000 and no message.timeout.ms", cm)
+	}
+	cm = dlqProducerConfig(connConfig{Brokers: []string{"b:9092"},
+		Raw: map[string]any{"message.timeout.ms": 5000, "delivery.timeout.ms": 7000}})
+	if cm["message.timeout.ms"] != 5000 {
+		t.Errorf("message.timeout.ms = %v, want 5000 (it wins over the alias)", cm["message.timeout.ms"])
+	}
 }
 
 func TestTruncateUTF8(t *testing.T) {

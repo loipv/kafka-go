@@ -42,16 +42,20 @@ type dlqService struct {
 }
 
 // dlqDeliveryTimeout bounds how long the poll loop waits for a DLQ delivery
-// report unless the DLQ connection's Raw config sets message.timeout.ms.
+// report unless the DLQ connection's Raw config sets message.timeout.ms
+// (or its alias delivery.timeout.ms).
 const dlqDeliveryTimeout = 30 * time.Second
 
 // dlqProducerConfig builds the DLQ producer's librdkafka config. The DLQ send
 // runs inside the consumer's poll loop, so message.timeout.ms is capped at
-// dlqDeliveryTimeout (rather than librdkafka's 5 minutes) unless Raw sets it.
+// dlqDeliveryTimeout (rather than librdkafka's 5 minutes) unless Raw sets
+// message.timeout.ms or its alias delivery.timeout.ms.
 func dlqProducerConfig(cc connConfig) ckafka.ConfigMap {
 	cm := cc.configMap()
 	cm["acks"] = -1 // All replicas
-	if _, ok := cm["message.timeout.ms"]; !ok {
+	_, hasMessage := cm["message.timeout.ms"]
+	_, hasAlias := cm["delivery.timeout.ms"] // librdkafka alias of message.timeout.ms
+	if !hasMessage && !hasAlias {
 		cm["message.timeout.ms"] = int(dlqDeliveryTimeout.Milliseconds())
 	}
 	return cm
