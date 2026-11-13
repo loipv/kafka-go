@@ -19,6 +19,19 @@ type blockState struct {
 	resumed bool
 }
 
+// minOffsets returns the lowest offset of msgs for each partition they come
+// from.
+func minOffsets(msgs []*Message) map[TopicPartition]int64 {
+	minOff := map[TopicPartition]int64{}
+	for _, m := range msgs {
+		tp := TopicPartition{Topic: m.Topic, Partition: m.Partition}
+		if o, ok := minOff[tp]; !ok || m.Offset < o {
+			minOff[tp] = m.Offset
+		}
+	}
+	return minOff
+}
+
 // blockMessages pauses the affected partitions, seeks them back to the
 // failed messages' offsets, and records an escalating retry-at deadline.
 // The poll loop keeps running — other partitions flow normally.
@@ -28,13 +41,7 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 	if len(msgs) == 0 {
 		return
 	}
-	minOff := map[TopicPartition]int64{}
-	for _, m := range msgs {
-		tp := TopicPartition{Topic: m.Topic, Partition: m.Partition}
-		if o, ok := minOff[tp]; !ok || m.Offset < o {
-			minOff[tp] = m.Offset
-		}
-	}
+	minOff := minOffsets(msgs)
 	now := time.Now()
 	var paused []ckafka.TopicPartition
 	c.blockMu.Lock()
