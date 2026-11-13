@@ -138,16 +138,11 @@ func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause erro
 	for range queued {
 		select {
 		case e := <-deliveryChan:
-			m, ok := e.(*ckafka.Message)
-			if !ok {
+			source, err := confirmDLQEvent(e)
+			if err != nil {
+				errs = append(errs, err)
 				continue
 			}
-			if m.TopicPartition.Error != nil {
-				errs = append(errs, fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error))
-				continue
-			}
-			// Metrics are keyed by the source topic, not the DLQ topic.
-			source, _ := m.Opaque.(string)
 			s.metrics.incrementSentToDLQ(source)
 		case <-ctx.Done():
 			// Unconfirmed messages are not counted; their reports land in the
@@ -157,6 +152,21 @@ func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause erro
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// confirmDLQEvent turns one delivery event into the confirmed message's source
+// topic (metrics are keyed by it, not by the DLQ topic) or an error.
+func confirmDLQEvent(e ckafka.Event) (string, error) {
+	m, ok := e.(*ckafka.Message)
+	if !ok {
+		// Fail safe: an unconfirmed message must block its partition and retry.
+		return "", fmt.Errorf("DLQ delivery: unexpected event %T: %v", e, e)
+	}
+	if m.TopicPartition.Error != nil {
+		return "", fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
+	}
+	source, _ := m.Opaque.(string)
+	return source, nil
 }
 
 // Close closes the DLQ service

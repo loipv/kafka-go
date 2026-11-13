@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 func TestIdempotencyStore(t *testing.T) {
@@ -201,5 +203,23 @@ func TestTruncateUTF8(t *testing.T) {
 	got := truncateUTF8(strings.Repeat("a", 1023)+"é"+"tail", 1024) // "é" is 2 bytes, straddles the limit
 	if len(got) != 1023 || !utf8.ValidString(got) {
 		t.Errorf("len = %d valid = %v, want 1023 bytes of valid UTF-8", len(got), utf8.ValidString(got))
+	}
+}
+
+func TestConfirmDLQEvent(t *testing.T) {
+	topic := "dlq"
+	ok := &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic}, Opaque: "orders"}
+	failed := &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic, Error: errors.New("boom")}, Opaque: "orders"}
+
+	if source, err := confirmDLQEvent(ok); err != nil || source != "orders" {
+		t.Errorf("confirmed message = (%q, %v), want (orders, nil)", source, err)
+	}
+	if _, err := confirmDLQEvent(failed); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("failed message err = %v, want one wrapping boom", err)
+	}
+	// An event that is not a delivery report confirms nothing: it must be an
+	// error, never a silent success.
+	if _, err := confirmDLQEvent(ckafka.NewError(ckafka.ErrFail, "x", false)); err == nil {
+		t.Error("non-message event err = nil, want an error")
 	}
 }
