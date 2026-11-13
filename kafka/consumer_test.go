@@ -15,157 +15,21 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// committedOffset reads the group's committed offset for one partition via the
-// admin API. Returns -1 (or librdkafka's OffsetInvalid) when nothing is
-// committed yet.
-func committedOffset(t *testing.T, brokers, group, topic string, partition int32) int64 {
-	t.Helper()
-	admin, err := ckafka.NewAdminClient(&ckafka.ConfigMap{"bootstrap.servers": brokers})
-	if err != nil {
-		t.Fatalf("admin: %v", err)
-	}
-	defer admin.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	res, err := admin.ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{{Group: group,
-		Partitions: []ckafka.TopicPartition{{Topic: &topic, Partition: partition}}}})
-	if err != nil || len(res.ConsumerGroupsTopicPartitions) == 0 {
-		return -1
-	}
-	for _, g := range res.ConsumerGroupsTopicPartitions {
-		for _, tp := range g.Partitions {
-			if tp.Partition == partition {
-				return int64(tp.Offset)
-			}
-		}
-	}
-	return -1
-}
-
-// fastAtLeastOnce is the common option set for the at-least-once tests:
-// quick retry cycles and a short auto-commit interval so committed offsets
-// move within waitFor deadlines.
-func fastAtLeastOnce(extra ...ConsumerOption) []ConsumerOption {
-	opts := []ConsumerOption{
-		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 10 * time.Millisecond}),
-		ConsumerWithAutoCommit(true),
-		ConsumerWithAutoCommitInterval(200 * time.Millisecond),
+func TestConsumer_BatchFlushByTimeout(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	got := make(chan int, 4)
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
 		ConsumerWithFromBeginning(true),
-	}
-	return append(opts, extra...)
-}
-
-func TestAtLeastOnce_NoDLQ_BlocksPartition(t *testing.T) {
-	skipIfShort(t)
-	mc := newMockCluster(t)
-	topic := uniqueTopic(t, mc, 1)
-	group := uniqueGroupName(t)
-
-	c, err := NewConsumer(append(fastAtLeastOnce(),
-		ConsumerWithBrokers(mc.BootstrapServers()),
-		ConsumerWithGroupID(group), ConsumerWithTopics(topic))...)
+		ConsumerWithBatchSize(10),
+		ConsumerWithBatchTimeout(300*time.Millisecond))
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
 	}
-	c.OnMessage(func(context.Context, *Message) error { return errors.New("always fails") })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.Start(ctx)
-	defer c.Close(context.Background())
-
-	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
-	if err != nil {
-		t.Fatalf("NewProducer: %v", err)
-	}
-	defer p.Close()
-	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
-		t.Fatalf("Produce: %v", err)
-	}
-
-	// With no DLQ and no error handler the message is unparkable: the
-	// partition must block and the committed offset must never advance.
-	waitFor(t, 10*time.Second, func() bool {
-		return len(c.Metrics().BlockedPartitions) > 0
-	}, "partition never reported blocked for unparkable message")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 1 {
-			t.Fatalf("committed offset = %d while message is unparkable, want no commit", off)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func TestAtLeastOnce_SkipOnMaxRetries_Advances(t *testing.T) {
-	skipIfShort(t)
-	mc := newMockCluster(t)
-	topic := uniqueTopic(t, mc, 1)
-	group := uniqueGroupName(t)
-
-	handlerCalls := int32(0)
-	errs := make(chan error, 4)
-	c, err := NewConsumer(append(fastAtLeastOnce(
-		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 10 * time.Millisecond, SkipOnMaxRetries: true}),
-		ConsumerWithErrorHandler(func(_ context.Context, _ *Message, err error) error {
-			atomic.AddInt32(&handlerCalls, 1)
-			errs <- err
-			return nil // claim ownership: park and advance
-		}),
-	),
-		ConsumerWithBrokers(mc.BootstrapServers()),
-		ConsumerWithGroupID(group), ConsumerWithTopics(topic))...)
-	if err != nil {
-		t.Fatalf("NewConsumer: %v", err)
-	}
-	c.OnMessage(func(context.Context, *Message) error { return errors.New("always fails") })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.Start(ctx)
-	defer c.Close(context.Background())
-
-	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
-	if err != nil {
-		t.Fatalf("NewProducer: %v", err)
-	}
-	defer p.Close()
-	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
-		t.Fatalf("Produce: %v", err)
-	}
-
-	// SkipOnMaxRetries is the explicit opt-in to loss: the error handler is
-	// notified once and the committed offset advances past the message.
-	waitFor(t, 10*time.Second, func() bool {
-		return len(errs) > 0
-	}, "error handler never notified of skipped message")
-	if err := <-errs; !errors.Is(err, ErrSkippedOnMaxRetries) {
-		t.Errorf("error handler got %v, want ErrSkippedOnMaxRetries", err)
-	}
-	waitFor(t, 10*time.Second, func() bool {
-		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) >= 1
-	}, "committed offset never advanced past skipped message")
-	if n := atomic.LoadInt32(&handlerCalls); n != 1 {
-		t.Errorf("error handler called %d times, want exactly 1", n)
-	}
-}
-
-func TestPartitionIsolation(t *testing.T) {
-	skipIfShort(t)
-	mc := newMockCluster(t)
-	topic := uniqueTopic(t, mc, 2) // 2 partitions
-	group := uniqueGroupName(t)
-
-	var p1Count int32
-	c, err := NewConsumer(append(fastAtLeastOnce(),
-		ConsumerWithBrokers(mc.BootstrapServers()),
-		ConsumerWithGroupID(group), ConsumerWithTopics(topic))...)
-	if err != nil {
-		t.Fatalf("NewConsumer: %v", err)
-	}
-	c.OnMessage(func(_ context.Context, msg *Message) error {
-		if msg.Partition == 0 {
-			return errors.New("partition 0 always fails")
-		}
-		atomic.AddInt32(&p1Count, 1)
+	c.OnBatch(func(_ context.Context, msgs []*Message) error {
+		got <- len(msgs)
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -173,69 +37,43 @@ func TestPartitionIsolation(t *testing.T) {
 	go c.Start(ctx)
 	defer c.Close(context.Background())
 
-	// Produce with explicit partitions (the library producer always lets the
-	// partitioner choose): 2 messages per partition.
-	raw, err := ckafka.NewProducer(&ckafka.ConfigMap{"bootstrap.servers": mc.BootstrapServers()})
-	if err != nil {
-		t.Fatalf("raw producer: %v", err)
-	}
-	for part := int32(0); part < 2; part++ {
-		for i := 0; i < 2; i++ {
-			_ = raw.Produce(&ckafka.Message{
-				TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: part},
-				Value:          []byte("v"),
-			}, nil)
+	p, _ := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	defer p.Close()
+	for i := 0; i < 3; i++ {
+		if err := p.Produce(context.Background(), topic, &Message{Value: []byte("x")}); err != nil {
+			t.Fatalf("Produce: %v", err)
 		}
 	}
-	raw.Flush(5000)
-	raw.Close()
-
-	// Partition 1 keeps flowing while partition 0 is blocked.
-	waitFor(t, 10*time.Second, func() bool { return atomic.LoadInt32(&p1Count) == 2 },
-		"partition 1 messages never processed while partition 0 was failing")
+	// Sum the drained batches: the three produces may straddle a flush tick,
+	// so asserting the FIRST flush == 3 has a partial-batch flake window.
+	total := 0
 	waitFor(t, 10*time.Second, func() bool {
-		return committedOffset(t, mc.BootstrapServers(), group, topic, 1) >= 2
-	}, "partition 1 committed offset never advanced")
-	waitFor(t, 10*time.Second, func() bool {
-		for _, tp := range c.Metrics().BlockedPartitions {
-			if tp.Topic == topic && tp.Partition == 0 {
-				return true
+		for {
+			select {
+			case n := <-got:
+				total += n
+			default:
+				return total >= 3
 			}
 		}
-		return false
-	}, "partition 0 never reported blocked")
-	if off := committedOffset(t, mc.BootstrapServers(), group, topic, 0); off >= 1 {
-		t.Errorf("partition 0 committed offset = %d, want no commit", off)
-	}
+	}, "batch never flushed >=3 messages by timeout")
 }
 
-func TestBlockedPartition_RecoversUnattended(t *testing.T) {
+func TestConsumer_ProduceConsumeRoundTrip(t *testing.T) {
 	skipIfShort(t)
 	mc := newMockCluster(t)
 	topic := uniqueTopic(t, mc, 1)
-	group := uniqueGroupName(t)
 
-	// Fail the ENTIRE first deliver cycle (MaxRetries=1 → 2 handler
-	// invocations), succeed from invocation 3 on. A third invocation is only
-	// possible via block → seek → resume, which pins the recovery path.
-	var mu sync.Mutex
-	invocations := map[int64]int{}
-	c, err := NewConsumer(append(fastAtLeastOnce(),
+	c, err := NewConsumer(
 		ConsumerWithBrokers(mc.BootstrapServers()),
-		ConsumerWithGroupID(group), ConsumerWithTopics(topic))...)
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithFromBeginning(true),
+	)
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
 	}
-	c.OnMessage(func(_ context.Context, msg *Message) error {
-		mu.Lock()
-		invocations[msg.Offset]++
-		n := invocations[msg.Offset]
-		mu.Unlock()
-		if n <= 2 {
-			return errors.New("first cycle fails")
-		}
-		return nil
-	})
+	got := make(chan *Message, 4)
+	c.OnMessage(func(_ context.Context, m *Message) error { got <- m; return nil })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go c.Start(ctx)
@@ -246,66 +84,239 @@ func TestBlockedPartition_RecoversUnattended(t *testing.T) {
 		t.Fatalf("NewProducer: %v", err)
 	}
 	defer p.Close()
-	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
+	sent := &Message{
+		Key:     []byte("round-trip-key"),
+		Value:   []byte("round-trip-value"),
+		Headers: Headers{"h1": []byte("v1"), "h2": []byte("v2")},
+	}
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, topic, sent); err != nil {
 		t.Fatalf("Produce: %v", err)
 	}
 
-	waitFor(t, 10*time.Second, func() bool {
-		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) >= 1
-	}, "blocked partition never recovered unattended (offset not committed)")
-	waitFor(t, 10*time.Second, func() bool {
-		return len(c.Metrics().BlockedPartitions) == 0
-	}, "BlockedPartitions never drained after recovery")
-	mu.Lock()
-	got := invocations[0]
-	mu.Unlock()
-	if got != 3 {
-		t.Errorf("message delivered %d handler invocations, want 3 (2 failing cycle + 1 successful redelivery)", got)
+	msg := recvMessages(t, got, 1, 15*time.Second)[0]
+	if string(msg.Key) != string(sent.Key) {
+		t.Errorf("Key = %q, want %q", msg.Key, sent.Key)
+	}
+	if string(msg.Value) != string(sent.Value) {
+		t.Errorf("Value = %q, want %q", msg.Value, sent.Value)
+	}
+	if len(msg.Headers) != len(sent.Headers) {
+		t.Fatalf("Headers = %v, want %v", msg.Headers, sent.Headers)
+	}
+	for k, v := range sent.Headers {
+		if string(msg.Headers[k]) != string(v) {
+			t.Errorf("header %q = %q, want %q", k, msg.Headers[k], v)
+		}
+	}
+	if msg.Topic != topic {
+		t.Errorf("Topic = %q, want %q", msg.Topic, topic)
+	}
+	if msg.Partition != 0 {
+		t.Errorf("Partition = %d, want 0", msg.Partition)
+	}
+	if msg.Offset != 0 {
+		t.Errorf("Offset = %d, want 0", msg.Offset)
 	}
 }
 
-func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
-	c := &Consumer{blocked: map[TopicPartition]blockState{
-		{"t1", 0, 0}: {retryAt: time.Now(), blocks: 1},
-		{"t1", 1, 0}: {retryAt: time.Now(), blocks: 2},
-	}, metrics: newMetricsCollector()}
+func TestConsumer_OnGroupedBatchPreservesFirstSeenKeyOrder(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
 
-	snap := c.blockedSnapshot()
-	if len(snap) != 2 {
-		t.Fatalf("blockedSnapshot() = %+v, want 2 partitions", snap)
+	c, err := NewConsumer(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithFromBeginning(true),
+		ConsumerWithBatchSize(10),
+		ConsumerWithBatchTimeout(300*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
 	}
-	topic := "t1"
-	c.dropBlockedFor([]ckafka.TopicPartition{{Topic: &topic, Partition: 0}})
-	snap = c.blockedSnapshot()
-	if len(snap) != 1 || snap[0].Topic != "t1" || snap[0].Partition != 1 {
-		t.Fatalf("after dropBlockedFor(p0): %+v, want only t1/1", snap)
+	groups := make(chan []GroupedBatch, 4)
+	c.OnGroupedBatch(func(_ context.Context, gs []GroupedBatch) error { groups <- gs; return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	// One partition keeps the c,a,c,b,a production order stable in the log.
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
 	}
-	if m := c.metrics.snapshot(); len(m.BlockedPartitions) != 1 || m.BlockedPartitions[0].Partition != 1 {
-		t.Errorf("metrics blocked partitions = %+v, want [t1/1]", m.BlockedPartitions)
+	defer p.Close()
+	keys := []string{"c", "a", "c", "b", "a"}
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	for _, k := range keys {
+		if err := p.Produce(pctx, topic, &Message{Key: []byte(k), Value: []byte(k)}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
 	}
-	c.dropBlockedFor([]ckafka.TopicPartition{{Partition: 7}}) // nil Topic must be skipped, not panic
-	if len(c.blockedSnapshot()) != 1 {
-		t.Error("nil-topic partition must be ignored by dropBlockedFor")
+
+	// Merge flushes in arrival order: each flush independently preserves
+	// first-seen order, so the merged sequence must be c,a,b even if the
+	// five produces straddle a flush tick.
+	var order []string
+	counts := map[string]int{}
+	total := 0
+	deadline := time.Now().Add(15 * time.Second)
+	for total < len(keys) && time.Now().Before(deadline) {
+		select {
+		case gs := <-groups:
+			for _, g := range gs {
+				if _, seen := counts[g.Key]; !seen {
+					order = append(order, g.Key)
+				}
+				counts[g.Key] += len(g.Messages)
+				total += len(g.Messages)
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if total != len(keys) {
+		t.Fatalf("grouped handler saw %d messages, want %d", total, len(keys))
+	}
+	wantOrder := []string{"c", "a", "b"}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("group order = %v, want %v", order, wantOrder)
+	}
+	for i := range wantOrder {
+		if order[i] != wantOrder[i] {
+			t.Fatalf("group order = %v, want %v (first-seen)", order, wantOrder)
+		}
+	}
+	for key, want := range map[string]int{"c": 2, "a": 2, "b": 1} {
+		if counts[key] != want {
+			t.Errorf("group %q got %d messages, want %d", key, counts[key], want)
+		}
 	}
 }
 
-// A parked message at or past the blocked offset clears the escalation state;
-// a park below it (an earlier offset) must not.
-func TestClearBlockedOnPark(t *testing.T) {
-	c := &Consumer{blocked: map[TopicPartition]blockState{
-		{Topic: "t", Partition: 0}: {retryAt: time.Now(), blocks: 3, offset: 5},
-	}, metrics: newMetricsCollector()}
+// TestConsumer_CommitResumeWithoutRebalanceCallback pins that an explicit
+// Commit with NO rebalance callback (dead in v1.0.0) persists the committed
+// offset, and a fresh consumer in the same group resumes right after it.
+func TestConsumer_CommitResumeWithoutRebalanceCallback(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
 
-	c.clearBlockedOnPark(&Message{Topic: "t", Partition: 0, Offset: 4})
-	if len(c.blockedSnapshot()) != 1 {
-		t.Fatal("park below the blocked offset must not clear state")
+	newC := func() *Consumer {
+		c, err := NewConsumer(
+			ConsumerWithBrokers(mc.BootstrapServers()),
+			ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+			ConsumerWithFromBeginning(true),
+			ConsumerWithAutoCommit(false),
+			// Short session: the mock coordinator completes B's join only
+			// after A's session expires, so the default 30s would stall the
+			// handover for the whole recv window.
+			ConsumerWithSessionTimeout(6*time.Second),
+			ConsumerWithHeartbeatInterval(2*time.Second),
+			// NO ConsumerWithRebalanceCallback — that is the point.
+		)
+		if err != nil {
+			t.Fatalf("NewConsumer: %v", err)
+		}
+		return c
 	}
-	c.clearBlockedOnPark(&Message{Topic: "t", Partition: 0, Offset: 5})
-	if len(c.blockedSnapshot()) != 0 {
-		t.Error("park at the blocked offset must clear state")
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
 	}
-	if got := c.metrics.snapshot().BlockedPartitions; len(got) != 0 {
-		t.Errorf("blocked gauge = %+v, want drained", got)
+	defer p.Close()
+	produce := func() {
+		pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pcancel()
+		for i := 0; i < 5; i++ {
+			if err := p.Produce(pctx, topic, &Message{Value: []byte("v")}); err != nil {
+				t.Fatalf("Produce: %v", err)
+			}
+		}
+	}
+
+	// First run: consume exactly the 5 messages that exist, commit them.
+	produce()
+	a := newC()
+	gotA := make(chan *Message, 8)
+	a.OnMessage(func(_ context.Context, m *Message) error { gotA <- m; return nil })
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	go a.Start(ctxA)
+	// Registered right after Start so a failed assertion below still tears A
+	// down. The explicit mid-test Close below wins the CAS; this deferred one
+	// is a no-op by then.
+	defer a.Close(context.Background())
+	first := recvMessages(t, gotA, 5, 15*time.Second)
+	if err := a.Commit(first...); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) == 5
+	}, "explicit Commit without a rebalance callback never persisted offset 5")
+	cancelA()
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatalf("close first consumer: %v", err)
+	}
+
+	// Second run, same group: only offsets 5..9 may arrive.
+	produce()
+	b := newC()
+	gotB := make(chan *Message, 8)
+	b.OnMessage(func(_ context.Context, m *Message) error { gotB <- m; return nil })
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	go b.Start(ctxB)
+	defer b.Close(context.Background())
+
+	resumed := recvMessages(t, gotB, 5, 15*time.Second)
+	for i, m := range resumed {
+		if m.Offset != int64(5+i) {
+			t.Errorf("resumed message %d has offset %d, want %d (group must resume at committed 5)", i, m.Offset, 5+i)
+		}
+	}
+}
+
+func TestConsumer_CommitOffsets(t *testing.T) {
+	msgs := []*Message{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "t", Partition: 0, Offset: 9},
+		{Topic: "t", Partition: 1, Offset: 3},
+		{Topic: "t", Partition: 2, Offset: 0}, // Kafka's first offset must not be dropped
+	}
+	got := commitOffsets(msgs)
+	// map iteration order is random — compare as a set. (Keyed by
+	// topic-string+partition: ckafka.TopicPartition holds a *string, which
+	// would compare pointer identity and make every lookup miss.)
+	byKey := map[string]ckafka.Offset{}
+	for _, tp := range got {
+		if tp.Topic == nil {
+			t.Fatal("commitOffsets returned a nil Topic")
+		}
+		byKey[fmt.Sprintf("%s/%d", *tp.Topic, tp.Partition)] = tp.Offset
+	}
+	if len(byKey) != 3 {
+		t.Fatalf("commitOffsets produced %d partitions, want 3 (deduped): %+v", len(byKey), got)
+	}
+	if o := byKey["t/0"]; o != ckafka.Offset(10) {
+		t.Errorf("partition 0 offset = %v, want 10 (max 9 + 1)", o)
+	}
+	if o := byKey["t/1"]; o != ckafka.Offset(4) {
+		t.Errorf("partition 1 offset = %v, want 4 (max 3 + 1)", o)
+	}
+	if o := byKey["t/2"]; o != ckafka.Offset(1) {
+		t.Errorf("partition 2 offset = %v, want 1 (offset 0 must be stored as 0+1)", o)
+	}
+}
+
+func TestConsumer_CommitOffsetsEmpty(t *testing.T) {
+	if got := commitOffsets(nil); len(got) != 0 {
+		t.Errorf("commitOffsets(nil) = %+v, want empty", got)
 	}
 }
 
@@ -313,7 +324,7 @@ func TestClearBlockedOnPark(t *testing.T) {
 // loop will close: an orphaned loopExited stalls Close for its full 5s
 // fallback and then destroys the consumer handle while the loop may still be
 // inside ReadMessage (cgo) — the segfault the handshake exists to prevent.
-func TestStartWhileRunningKeepsCloseHandshake(t *testing.T) {
+func TestConsumer_StartWhileRunningKeepsCloseHandshake(t *testing.T) {
 	skipIfShort(t)
 	mc := newMockCluster(t)
 	topic := uniqueTopic(t, mc, 1)
@@ -360,7 +371,7 @@ func TestStartWhileRunningKeepsCloseHandshake(t *testing.T) {
 	}
 }
 
-func TestStartRequiresHandler(t *testing.T) {
+func TestConsumer_StartRequiresHandler(t *testing.T) {
 	skipIfShort(t) // no broker needed, but keeps policy uniform
 	c, err := NewConsumer(ConsumerWithBrokers("localhost:9092"),
 		ConsumerWithGroupID("g"), ConsumerWithTopics("t"))
@@ -674,7 +685,7 @@ func TestConsumer_FailedBatchRecordsNoKeys(t *testing.T) {
 		"keys of the failed batch were recorded: the retry batch never reached the handler")
 }
 
-func TestNewConsumer_Validation(t *testing.T) {
+func TestConsumer_Validation(t *testing.T) {
 	base := []ConsumerOption{ConsumerWithBrokers("127.0.0.1:1"), ConsumerWithGroupID("g"), ConsumerWithTopics("t")}
 	tests := []struct {
 		name string
@@ -709,7 +720,7 @@ func BenchmarkCommitOffsets_Single(b *testing.B) {
 
 // Message keys, values and headers must never reach the logs, and an
 // idempotency key is derived from them.
-func TestProcessMessage_DuplicateLogOmitsIdempotencyKey(t *testing.T) {
+func TestConsumer_ProcessMessageDuplicateLogOmitsIdempotencyKey(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	s := newIdempotencyStore(time.Hour)
@@ -735,7 +746,7 @@ func TestProcessMessage_DuplicateLogOmitsIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestIsFatalClientError(t *testing.T) {
+func TestConsumer_IsFatalClientError(t *testing.T) {
 	fatal := ckafka.NewError(ckafka.ErrFencedInstanceID, "fenced", true)
 	tests := []struct {
 		name string
@@ -757,7 +768,7 @@ func TestIsFatalClientError(t *testing.T) {
 	}
 }
 
-func TestIgnoreNoOffset(t *testing.T) {
+func TestConsumer_IgnoreNoOffset(t *testing.T) {
 	noOffset := ckafka.NewError(ckafka.ErrNoOffset, "no offset", false)
 	transport := ckafka.NewError(ckafka.ErrTransport, "x", false)
 	plain := errors.New("plain")

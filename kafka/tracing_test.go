@@ -13,7 +13,7 @@ import (
 
 // Without otel.SetTextMapPropagator, the global is a no-op and W3C
 // propagation silently did nothing. The library must default to TraceContext.
-func TestTracingServiceInjectsWithoutGlobalPropagator(t *testing.T) {
+func TestTracing_ServiceInjectsWithoutGlobalPropagator(t *testing.T) {
 	orig := otel.GetTextMapPropagator()
 	t.Cleanup(func() { otel.SetTextMapPropagator(orig) })
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator()) // the no-op default

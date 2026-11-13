@@ -7,7 +7,36 @@ import (
 	"time"
 )
 
-func TestLagForPartition(t *testing.T) {
+func TestHealth_CheckAgainstMockCluster(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	hc, err := NewHealthChecker(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewHealthChecker: %v", err)
+	}
+	defer hc.Close()
+
+	// Each check gets a 2s deadline so DOWN is detected well inside waitFor.
+	check := func() *HealthResult {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return hc.Check(ctx)
+	}
+
+	if res := check(); res.Status != HealthStatusUp {
+		t.Fatalf("Check() = %s (%s), want UP", res.Status, res.Error)
+	}
+
+	// MockCluster broker ids start at 1 (not 0).
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	waitFor(t, 20*time.Second, func() bool {
+		return check().Status == HealthStatusDown
+	}, "Check() never reported DOWN with the only broker down")
+}
+
+func TestHealth_LagForPartition(t *testing.T) {
 	tests := []struct {
 		name            string
 		high, committed int64
@@ -28,7 +57,7 @@ func TestLagForPartition(t *testing.T) {
 	}
 }
 
-func TestQueryTimeoutMs(t *testing.T) {
+func TestHealth_QueryTimeoutMs(t *testing.T) {
 	h := &HealthChecker{} // zero value: defaultHealthTimeout (10s) when ctx has no deadline
 
 	t.Run("cancelled context returns its error", func(t *testing.T) {

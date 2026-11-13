@@ -4,15 +4,82 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestExecuteWithRetryCapsDelay pins that the retry sleep sequence respects
+func TestRetry_Budget(t *testing.T) {
+	// defaults: 3 retries, 1s initial, 2x => 1+2+4 = 7s
+	if got, want := retryBudget(normalizeRetry(nil)), 7*time.Second; got != want {
+		t.Errorf("retryBudget(normalizeRetry(nil)) = %v, want %v", got, want)
+	}
+	// MaxInterval caps each delay. 3 sleeps (1+2 would be followed by a capped
+	// 3): 1+2+3 = 6s. (The brief's "1+2+3+3 = 9s" miscounted four sleeps for
+	// three retries — executeWithRetry sleeps only between attempts.)
+	r := &RetryConfig{MaxRetries: 3, InitialInterval: time.Second, Multiplier: 2, MaxInterval: 3 * time.Second}
+	if got, want := retryBudget(normalizeRetry(r)), 6*time.Second; got != want {
+		t.Errorf("retryBudget(capped) = %v, want %v", got, want)
+	}
+}
+
+func TestRetry_SkipOnMaxRetriesAdvances(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	handlerCalls := int32(0)
+	errs := make(chan error, 4)
+	c, err := NewConsumer(append(fastAtLeastOnce(
+		ConsumerWithRetry(&RetryConfig{MaxRetries: 1, InitialInterval: 10 * time.Millisecond, SkipOnMaxRetries: true}),
+		ConsumerWithErrorHandler(func(_ context.Context, _ *Message, err error) error {
+			atomic.AddInt32(&handlerCalls, 1)
+			errs <- err
+			return nil // claim ownership: park and advance
+		}),
+	),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic))...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return errors.New("always fails") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	// SkipOnMaxRetries is the explicit opt-in to loss: the error handler is
+	// notified once and the committed offset advances past the message.
+	waitFor(t, 10*time.Second, func() bool {
+		return len(errs) > 0
+	}, "error handler never notified of skipped message")
+	if err := <-errs; !errors.Is(err, ErrSkippedOnMaxRetries) {
+		t.Errorf("error handler got %v, want ErrSkippedOnMaxRetries", err)
+	}
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) >= 1
+	}, "committed offset never advanced past skipped message")
+	if n := atomic.LoadInt32(&handlerCalls); n != 1 {
+		t.Errorf("error handler called %d times, want exactly 1", n)
+	}
+}
+
+// TestRetry_CapsDelay pins that the retry sleep sequence respects
 // RetryConfig.MaxInterval. retryBudget (and the max.poll.interval.ms floor
 // derived from it) models capped delays — uncapped sleeps would exceed the
 // poll interval mid-retry and evict the consumer from the group.
-func TestExecuteWithRetryCapsDelay(t *testing.T) {
+func TestRetry_CapsDelay(t *testing.T) {
 	c := &Consumer{
 		retry: normalizeRetry(&RetryConfig{
 			MaxRetries:      5,
@@ -43,7 +110,7 @@ func TestExecuteWithRetryCapsDelay(t *testing.T) {
 	}
 }
 
-func TestExecuteWithRetryBackoffMath(t *testing.T) {
+func TestRetry_BackoffMath(t *testing.T) {
 	tests := []struct {
 		name       string
 		retry      *RetryConfig
@@ -111,7 +178,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 	}
 }
 
-func TestExecuteWithRetryContextCancel(t *testing.T) {
+func TestRetry_ContextCancel(t *testing.T) {
 	c := &Consumer{retry: normalizeRetry(&RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}),
 		after:   func(_ time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
 		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}

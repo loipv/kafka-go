@@ -3,7 +3,9 @@ package kafka
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -11,51 +13,238 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-func TestIdempotencyStore(t *testing.T) {
-	t.Run("duplicate within ttl", func(t *testing.T) {
-		s := newIdempotencyStore(time.Minute)
-		defer s.close()
-		s.add("k")
-		if !s.isDuplicate("k") {
-			t.Error("isDuplicate(k) = false after Add")
-		}
-		if s.isDuplicate("other") {
-			t.Error("isDuplicate(other) = true, want false")
-		}
+// A failing handler with DLQ config parks via a CONFIRMED DLQ
+// produce — the DLQ copy carries the diagnostic headers and the source
+// offset then advances.
+func TestDLQ_RoundTrip(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	source := uniqueTopic(t, mc, 1)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	handlerErr := errors.New("handler always fails")
+	var errHandlerCalls int32
+	c, err := NewConsumer(append(fastAtLeastOnce(
+		ConsumerWithErrorHandler(func(_ context.Context, _ *Message, err error) error {
+			atomic.AddInt32(&errHandlerCalls, 1)
+			return err // recorded, but defer to the DLQ
+		}),
+	),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{
+			Topic: dlqTopic, IncludeErrorInfo: true,
+		}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return handlerErr })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, source, &Message{Value: []byte("poison")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	// Read the DLQ copy with a scratch consumer.
+	scratch, err := ckafka.NewConsumer(&ckafka.ConfigMap{
+		"bootstrap.servers": mc.BootstrapServers(),
+		"group.id":          uniqueGroupName(t),
+		"auto.offset.reset": "earliest",
 	})
-	t.Run("expired keys are not duplicates", func(t *testing.T) {
-		s := newIdempotencyStore(40 * time.Millisecond)
-		defer s.close()
-		s.add("k")
-		time.Sleep(120 * time.Millisecond) // > ttl + one cleanup tick (ttl/10)
-		if s.isDuplicate("k") {
-			t.Error("isDuplicate(k) = true after ttl expiry")
+	if err != nil {
+		t.Fatalf("scratch consumer: %v", err)
+	}
+	defer scratch.Close()
+	if err := scratch.Subscribe(dlqTopic, nil); err != nil {
+		t.Fatalf("subscribe dlq: %v", err)
+	}
+	var dlqMsg *ckafka.Message
+	deadline := time.Now().Add(20 * time.Second)
+	for dlqMsg == nil && time.Now().Before(deadline) {
+		if m, err := scratch.ReadMessage(200 * time.Millisecond); err == nil {
+			dlqMsg = m
 		}
-	})
-	t.Run("zero ttl is clamped, not panicked", func(t *testing.T) {
-		s := newIdempotencyStore(0) // used to panic: time.NewTicker(0)
-		defer s.close()
-		s.add("k")
-		if !s.isDuplicate("k") {
-			t.Error("isDuplicate(k) = false with clamped ttl")
-		}
-	})
-	t.Run("double close does not panic", func(_ *testing.T) {
-		s := newIdempotencyStore(time.Minute)
-		s.close()
-		s.close() // used to panic: close of closed channel
-	})
+	}
+	if dlqMsg == nil {
+		t.Fatal("message never arrived on the DLQ topic")
+	}
+
+	hdrs := map[string][]byte{}
+	for _, h := range dlqMsg.Headers {
+		hdrs[h.Key] = h.Value
+	}
+	if got := string(hdrs["x-dlq-original-topic"]); got != source {
+		t.Errorf("x-dlq-original-topic = %q, want %q", got, source)
+	}
+	if msg := string(hdrs["x-dlq-error-message"]); !strings.Contains(msg, handlerErr.Error()) {
+		t.Errorf("x-dlq-error-message = %q, want it to contain %q", msg, handlerErr.Error())
+	}
+	attempts := 2 // fastAtLeastOnce pins Retry.MaxRetries=1 → 2 handler invocations
+	if got := string(hdrs["x-dlq-handler-retry-count"]); got != strconv.Itoa(attempts) {
+		t.Errorf("x-dlq-handler-retry-count = %q, want %q", got, strconv.Itoa(attempts))
+	}
+	if string(dlqMsg.Value) != "poison" {
+		t.Errorf("dlq value = %q, want the original payload", dlqMsg.Value)
+	}
+	if n := atomic.LoadInt32(&errHandlerCalls); n == 0 {
+		t.Error("error handler never recorded the failure")
+	}
+
+	// Parked via the confirmed DLQ produce: the source offset must advance.
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, source, 0) >= 1
+	}, "source offset never advanced past the DLQ-parked message")
 }
 
-func TestMessageSetHeader(t *testing.T) {
-	var m Message // nil Headers
-	m.SetHeader("k", []byte("v"))
-	if string(m.Headers["k"]) != "v" {
-		t.Errorf("SetHeader on nil map: got %v", m.Headers)
+// DLQ on a separate cluster: the parked copy lands on DLQConfig.Brokers'
+// cluster, never on the consumer's.
+func TestDLQ_SeparateCluster(t *testing.T) {
+	skipIfShort(t)
+	src := newMockCluster(t)
+	dst := newMockCluster(t)
+	source := uniqueTopic(t, src, 1)
+	dlqTopic := uniqueTopic(t, dst, 1)
+	if err := src.CreateTopic(dlqTopic, 1, 1); err != nil {
+		t.Fatalf("CreateTopic on source cluster: %v", err)
 	}
-	m.SetHeader("k", []byte("v2"))
-	if len(m.Headers) != 1 || string(m.Headers["k"]) != "v2" {
-		t.Errorf("SetHeader overwrite: got %v", m.Headers)
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(src.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{
+			Topic: dlqTopic, Brokers: []string{dst.BootstrapServers()},
+		}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return errors.New("fail") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(src.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, source, &Message{Value: []byte("poison")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	// Parked once the source offset advances — by then the DLQ produce is confirmed.
+	waitFor(t, 20*time.Second, func() bool {
+		return committedOffset(t, src.BootstrapServers(), group, source, 0) >= 1
+	}, "source offset never advanced past the DLQ-parked message")
+
+	if n := topicHighWatermark(t, dst.BootstrapServers(), dlqTopic); n != 1 {
+		t.Errorf("DLQ cluster %s high watermark = %d, want 1", dlqTopic, n)
+	}
+	if n := topicHighWatermark(t, src.BootstrapServers(), dlqTopic); n != 0 {
+		t.Errorf("consumer cluster %s high watermark = %d, want 0 (DLQ leaked to source cluster)", dlqTopic, n)
+	}
+}
+
+// TestDLQ_BrokerDownBlocksInsteadOfDropping pins that when the DLQ produce
+// cannot be CONFIRMED (broker unreachable) the source partition BLOCKS — the
+// message is never dropped. The handler is
+// gated so the poison message is fetched while the broker is up; the broker
+// then goes down before the handler starts failing, so every DLQ produce
+// attempt times out (message.timeout.ms is pinned low for that).
+func TestDLQ_BrokerDownBlocksInsteadOfDropping(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	source := uniqueTopic(t, mc, 1)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	// message.timeout.ms flows through connConfig.Raw into the DLQ producer:
+	// without it the dead-broker produce would hang on librdkafka's 5m
+	// default and the block would never be recorded in the test window.
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic}),
+		ConsumerWithRawConfig(map[string]any{"message.timeout.ms": 5000}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	entered := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	c.OnMessage(func(context.Context, *Message) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-gate
+		return errors.New("handler always fails")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer c.Close(context.Background()) // LIFO: cancel runs first, unblocking the DLQ produce wait
+	defer cancel()
+	go c.Start(ctx)
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	if err := p.Produce(pctx, source, &Message{Value: []byte("poison")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("poison message never fetched while the broker was up")
+	}
+	// MockCluster broker ids start at 1 (not 0). Taking the broker down
+	// kills source and DLQ alike — with the shared connection config that
+	// is exactly the unreachable-DLQ scenario.
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	close(gate) // ...and let the handler start failing
+
+	waitFor(t, 30*time.Second, func() bool {
+		for _, tp := range c.Metrics().BlockedPartitions {
+			if tp.Topic == source && tp.Partition == 0 {
+				return true
+			}
+		}
+		return false
+	}, "source partition never blocked while the DLQ broker was down")
+	if got := c.Metrics().SentToDLQ; got != 0 {
+		t.Errorf("SentToDLQ = %d with the broker down, want 0 (no confirmed produce)", got)
+	}
+
+	// Blocked means blocked: no commit for ~3s. With the broker down nothing
+	// can commit at all — reading the group offsets fails, reported as -1.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if off := committedOffset(t, mc.BootstrapServers(), group, source, 0); off >= 1 {
+			t.Fatalf("committed offset = %d while the DLQ was down, want no advance (block, not drop)", off)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -159,37 +348,7 @@ func TestDLQ_BatchFailureSendsWholeBatch(t *testing.T) {
 	}
 }
 
-func TestMetricsSnapshotCounts(t *testing.T) {
-	m := newMetricsCollector()
-	m.incHandlerFailures("a")
-	m.incHandlerFailures("a")
-	m.incHandlerFailures("b")
-	m.incSentToDLQ("a")
-	got := m.snapshot()
-	if got.HandlerFailures != 3 || got.SentToDLQ != 1 {
-		t.Errorf("totals = (%d failures, %d dlq), want (3, 1)", got.HandlerFailures, got.SentToDLQ)
-	}
-	if a := got.ByTopic["a"]; a != (TopicMetrics{HandlerFailures: 2, SentToDLQ: 1}) {
-		t.Errorf("ByTopic[a] = %+v, want {2 1}", a)
-	}
-	if b := got.ByTopic["b"]; b != (TopicMetrics{HandlerFailures: 1}) {
-		t.Errorf("ByTopic[b] = %+v, want {1 0}", b)
-	}
-}
-
-func TestMetricsBlockedGauge(t *testing.T) {
-	m := newMetricsCollector()
-	m.setBlocked([]TopicPartition{{Topic: "t", Partition: 1}})
-	if got := m.snapshot().BlockedPartitions; len(got) != 1 || got[0].Partition != 1 {
-		t.Errorf("BlockedPartitions = %v, want one entry for t[1]", got)
-	}
-	m.setBlocked(nil)
-	if got := m.snapshot().BlockedPartitions; len(got) != 0 {
-		t.Errorf("BlockedPartitions after clear = %v, want empty", got)
-	}
-}
-
-func TestDLQProducerConfig(t *testing.T) {
+func TestDLQ_ProducerConfig(t *testing.T) {
 	cm := dlqProducerConfig(connConfig{Brokers: []string{"b:9092"}})
 	if cm["acks"] != -1 || cm["message.timeout.ms"] != 30000 {
 		t.Errorf("defaults = acks %v, timeout %v; want -1, 30000", cm["acks"], cm["message.timeout.ms"])
@@ -211,7 +370,7 @@ func TestDLQProducerConfig(t *testing.T) {
 	}
 }
 
-func TestTruncateUTF8(t *testing.T) {
+func TestDLQ_TruncateUTF8(t *testing.T) {
 	if got := truncateUTF8("short", 1024); got != "short" {
 		t.Errorf("short string changed: %q", got)
 	}
@@ -224,7 +383,7 @@ func TestTruncateUTF8(t *testing.T) {
 	}
 }
 
-func TestConfirmDLQEvent(t *testing.T) {
+func TestDLQ_ConfirmEvent(t *testing.T) {
 	topic := "dlq"
 	ok := &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic}, Opaque: "orders"}
 	failed := &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic, Error: errors.New("boom")}, Opaque: "orders"}
