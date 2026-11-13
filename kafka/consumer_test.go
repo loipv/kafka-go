@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -564,6 +565,110 @@ func TestConsumer_BatchIdempotencySkipsProcessedKeys(t *testing.T) {
 	if len(got) != 2 {
 		t.Errorf("handler saw %v, want only the first two values", got)
 	}
+}
+
+func TestConsumer_HandleBatchErrorHonoursErrorHandler(t *testing.T) {
+	batch := []*Message{{Topic: "t"}, {Topic: "t"}}
+	discard := slog.New(slog.DiscardHandler)
+	claimAll := &Consumer{logger: discard, config: &ConsumerConfig{
+		ErrorHandler: func(context.Context, *Message, error) error { return nil }}}
+	if claimAll.handleBatchError(context.Background(), errors.New("boom"), batch) {
+		t.Error("blocked = true, want false: the error handler took ownership of every message")
+	}
+	none := &Consumer{logger: discard, config: &ConsumerConfig{}}
+	if !none.handleBatchError(context.Background(), errors.New("boom"), batch) {
+		t.Error("blocked = false, want true: no error handler and no DLQ")
+	}
+}
+
+// failingBatchConsumer starts a mock-broker consumer (batch size 2) whose
+// OnBatch handler fails while *fail is set, with an error handler that records
+// every value it receives and claims the message.
+func failingBatchConsumer(t *testing.T, mc *ckafka.MockCluster, topic string, fail *atomic.Bool) (handled, errored func() []string, stop func()) {
+	t.Helper()
+	var mu sync.Mutex
+	var okVals, errVals []string
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()), ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithBatchSize(2), ConsumerWithBatchTimeout(200*time.Millisecond),
+		ConsumerWithIdempotencyKey(func(m *Message) string { return string(m.Key) }),
+		ConsumerWithErrorHandler(func(_ context.Context, m *Message, _ error) error {
+			mu.Lock()
+			defer mu.Unlock()
+			errVals = append(errVals, string(m.Value))
+			return nil
+		}))...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(_ context.Context, msgs []*Message) error {
+		if fail.Load() {
+			return errors.New("batch fails")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range msgs {
+			okVals = append(okVals, string(m.Value))
+		}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = c.Start(ctx) }()
+	snap := func(src *[]string) func() []string {
+		return func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), (*src)...) }
+	}
+	return snap(&okVals), snap(&errVals), func() { cancel(); _ = c.Close(context.Background()) }
+}
+
+func TestConsumer_FailedBatchSendsOnlyNonDuplicatesToErrorHandler(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, _ := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	defer p.Close()
+	var fail atomic.Bool
+	handled, errored, stop := failingBatchConsumer(t, mc, topic, &fail)
+	defer stop()
+	produce := func(k, v string) {
+		if err := p.Produce(context.Background(), topic, &Message{Key: []byte(k), Value: []byte(v)}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	produce("a", "1")
+	produce("b", "2")
+	waitFor(t, 15*time.Second, func() bool { return len(handled()) == 2 }, "first batch never handled")
+	fail.Store(true)
+	produce("a", "3") // duplicate of a processed key: filtered before the handler
+	produce("c", "4")
+	waitFor(t, 15*time.Second, func() bool { return len(errored()) > 0 }, "error handler never called")
+	if got := errored(); len(got) != 1 || got[0] != "4" {
+		t.Errorf("error handler received %v, want only [4]", got)
+	}
+}
+
+func TestConsumer_FailedBatchRecordsNoKeys(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, _ := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	defer p.Close()
+	var fail atomic.Bool
+	fail.Store(true)
+	handled, errored, stop := failingBatchConsumer(t, mc, topic, &fail)
+	defer stop()
+	produce := func(k, v string) {
+		if err := p.Produce(context.Background(), topic, &Message{Key: []byte(k), Value: []byte(v)}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+	produce("c", "1")
+	produce("d", "2")
+	waitFor(t, 15*time.Second, func() bool { return len(errored()) == 2 }, "failed batch never reached the error handler")
+	fail.Store(false)
+	produce("c", "3") // same keys again: must not be filtered as duplicates
+	produce("d", "4")
+	waitFor(t, 15*time.Second, func() bool { return len(handled()) == 2 },
+		"keys of the failed batch were recorded: the retry batch never reached the handler")
 }
 
 func TestNewConsumer_Validation(t *testing.T) {

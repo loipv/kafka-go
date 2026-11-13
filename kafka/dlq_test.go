@@ -111,6 +111,52 @@ func TestDLQ_MetricsKeyedBySourceTopic(t *testing.T) {
 	}
 }
 
+func TestDLQ_BatchFailureSendsWholeBatch(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	source := uniqueTopic(t, mc, 1)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	group := uniqueGroupName(t)
+
+	c, err := NewConsumer(append(fastAtLeastOnce(),
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(source),
+		ConsumerWithBatchSize(5), ConsumerWithBatchTimeout(200*time.Millisecond),
+		ConsumerWithDLQ(&DLQConfig{Topic: dlqTopic}),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnBatch(func(context.Context, []*Message) error { return errors.New("batch always fails") })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Start(ctx)
+	defer c.Close(context.Background())
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	for i := range 5 {
+		if err := p.Produce(pctx, source, &Message{Value: []byte{byte('0' + i)}}); err != nil {
+			t.Fatalf("Produce: %v", err)
+		}
+	}
+
+	waitFor(t, 20*time.Second, func() bool {
+		return topicHighWatermark(t, mc.BootstrapServers(), dlqTopic) == 5
+	}, "the whole batch never arrived on the DLQ topic")
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, source, 0) == 5
+	}, "source offset never advanced past the DLQ-parked batch")
+	if got := c.DLQMetrics().Global.MessagesSentToDLQ; got != 5 {
+		t.Errorf("Global.MessagesSentToDLQ = %d, want 5", got)
+	}
+}
+
 func TestDLQMetricsBlockedGauge(t *testing.T) {
 	m := newMetricsCollector()
 	m.setBlocked([]TopicPartition{{Topic: "t", Partition: 1}})

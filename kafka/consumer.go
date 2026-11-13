@@ -626,18 +626,32 @@ func (c *Consumer) groupByKey(msgs []*Message) []GroupedBatch {
 	return result
 }
 
-// handleBatchError routes a batch-level error through the per-message
-// handleError path (each outcome decides). It reports whether any message
-// ended up unparkable. The batch handler runs once — no executeWithRetry —
-// so attempts is 1.
+// handleBatchError routes a batch-level error: every message is first offered
+// to the error handler (nil return = it took ownership), then all unclaimed
+// messages go to the DLQ in one produce-then-await pass. It reports whether the
+// batch is unparkable (no DLQ for an unclaimed message, or the DLQ produce
+// failed). The batch handler runs once — no executeWithRetry — so attempts is 1.
 func (c *Consumer) handleBatchError(ctx context.Context, err error, batch []*Message) bool {
-	blocked := false
-	for _, msg := range batch {
-		if c.handleError(ctx, err, msg, 1) == outcomeBlocked {
-			blocked = true
+	unclaimed := batch
+	if c.config.ErrorHandler != nil {
+		unclaimed = make([]*Message, 0, len(batch))
+		for _, msg := range batch {
+			if c.config.ErrorHandler(ctx, msg, err) != nil {
+				unclaimed = append(unclaimed, msg)
+			}
 		}
 	}
-	return blocked
+	if len(unclaimed) == 0 {
+		return false
+	}
+	if c.dlqService == nil {
+		return true
+	}
+	if dlqErr := c.dlqService.produceAll(ctx, unclaimed, err, 1); dlqErr != nil {
+		c.logger.Error("dlq produce failed", "error", dlqErr)
+		return true
+	}
+	return false
 }
 
 // batchFlushLoop ticks every BatchTimeout and signals the main loop to flush.

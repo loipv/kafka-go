@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -73,22 +74,23 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) 
 	}, nil
 }
 
-// produceToDLQ sends a failed message to the DLQ topic. The caller's Message
-// is never mutated — DLQ headers go on a shallow copy. The produce is a
-// single attempt confirmed by a delivery report; the caller decides what a
-// failure means (the partition blocks).
+// produceToDLQ sends one failed message to the DLQ topic; see produceAll.
 func (s *dlqService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return ErrDLQClosed
-	}
+	return s.produceAll(ctx, []*Message{msg}, err, attempts)
+}
+
+// buildDLQMessage copies msg into a DLQ record. The caller's Message is never
+// mutated — the x-dlq-* headers go on a clone. The delivery report echoes the
+// source topic back through Opaque so metrics can be keyed by it.
+func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *ckafka.Message {
 	out := *msg
 	out.Headers = maps.Clone(msg.Headers) // nil-safe
 
 	out.SetHeader("x-dlq-original-topic", []byte(msg.Topic))
 	out.SetHeader("x-dlq-timestamp", appendTime(nil, time.Now()))
 	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // #9: the real count
-	if s.config.IncludeErrorInfo && err != nil {
-		out.SetHeader("x-dlq-error-message", []byte(truncateUTF8(err.Error(), maxDLQErrorBytes)))
+	if s.config.IncludeErrorInfo && cause != nil {
+		out.SetHeader("x-dlq-error-message", []byte(truncateUTF8(cause.Error(), maxDLQErrorBytes)))
 	}
 
 	dlqTopic := s.config.Topic
@@ -97,35 +99,60 @@ func (s *dlqService) produceToDLQ(ctx context.Context, msg *Message, err error, 
 			Topic:     &dlqTopic,
 			Partition: ckafka.PartitionAny,
 		},
-		Key:   out.Key,
-		Value: out.Value,
+		Key:    out.Key,
+		Value:  out.Value,
+		Opaque: msg.Topic,
 	}
-
-	// Add headers
 	for k, v := range out.Headers {
-		kafkaMsg.Headers = append(kafkaMsg.Headers, ckafka.Header{
-			Key:   k,
-			Value: v,
-		})
+		kafkaMsg.Headers = append(kafkaMsg.Headers, ckafka.Header{Key: k, Value: v})
 	}
+	return kafkaMsg
+}
 
-	deliveryChan := make(chan ckafka.Event, 1)
-	if perr := s.producer.Produce(kafkaMsg, deliveryChan); perr != nil {
-		return fmt.Errorf("failed to produce to DLQ: %w", perr)
+// produceAll sends msgs to the DLQ topic: it queues every message first, then
+// awaits one delivery report per queued message, so a batch costs one round
+// trip instead of len(msgs). Each message is a single produce attempt confirmed
+// by its delivery report; the sent-to-DLQ metric counts confirmed messages only,
+// keyed by source topic. It returns the errors.Join of every failure and nil
+// only when all messages were confirmed; the caller decides what a failure
+// means (the partition blocks).
+func (s *dlqService) produceAll(ctx context.Context, msgs []*Message, cause error, attempts int) error {
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return ErrDLQClosed
 	}
-
-	// Wait for delivery
-	select {
-	case e := <-deliveryChan:
-		if m, ok := e.(*ckafka.Message); ok && m.TopicPartition.Error != nil {
-			return fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
+	deliveryChan := make(chan ckafka.Event, len(msgs))
+	var errs []error
+	queued := 0
+	for _, msg := range msgs {
+		if perr := s.producer.Produce(s.buildDLQMessage(msg, cause, attempts), deliveryChan); perr != nil {
+			errs = append(errs, fmt.Errorf("failed to produce to DLQ: %w", perr))
+			continue
 		}
-		// Metrics are keyed by the source topic, not the DLQ topic.
-		s.metrics.incrementSentToDLQ(msg.Topic)
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		queued++
 	}
+
+	for range queued {
+		select {
+		case e := <-deliveryChan:
+			m, ok := e.(*ckafka.Message)
+			if !ok {
+				continue
+			}
+			if m.TopicPartition.Error != nil {
+				errs = append(errs, fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error))
+				continue
+			}
+			// Metrics are keyed by the source topic, not the DLQ topic.
+			source, _ := m.Opaque.(string)
+			s.metrics.incrementSentToDLQ(source)
+		case <-ctx.Done():
+			// Unconfirmed messages are not counted; their reports land in the
+			// buffered channel and are dropped with it.
+			errs = append(errs, fmt.Errorf("DLQ delivery interrupted: %w", ctx.Err()))
+			return errors.Join(errs...)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Close closes the DLQ service
