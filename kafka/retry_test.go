@@ -21,7 +21,7 @@ func TestExecuteWithRetryCapsDelay(t *testing.T) {
 			MaxInterval:     150 * time.Millisecond,
 		}},
 		logger:  slog.New(slog.DiscardHandler),
-		metrics: NewDLQMetricsCollector(),
+		metrics: newMetricsCollector(),
 		after:   time.After, // executeWithRetry sleeps through this seam
 	}
 	c.OnMessage(func(context.Context, *Message) error { return errors.New("boom") })
@@ -82,7 +82,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 					ch <- time.Now()
 					return ch
 				},
-				metrics: NewDLQMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
+				metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 			calls := 0
 			c.messageHandler = func(_ context.Context, _ *Message) error {
 				calls++
@@ -114,7 +114,7 @@ func TestExecuteWithRetryBackoffMath(t *testing.T) {
 func TestExecuteWithRetryContextCancel(t *testing.T) {
 	c := &Consumer{config: &ConsumerConfig{Retry: &RetryConfig{MaxRetries: 5, InitialInterval: time.Hour}},
 		after:   func(_ time.Duration) <-chan time.Time { return make(chan time.Time) }, // never fires
-		metrics: NewDLQMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
+		metrics: newMetricsCollector(), logger: slog.New(slog.DiscardHandler)}
 	c.messageHandler = func(context.Context, *Message) error { return errors.New("boom") }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

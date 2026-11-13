@@ -264,7 +264,7 @@ func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
 	c := &Consumer{blocked: map[TopicPartition]blockState{
 		{"t1", 0, 0}: {retryAt: time.Now(), blocks: 1},
 		{"t1", 1, 0}: {retryAt: time.Now(), blocks: 2},
-	}, metrics: NewDLQMetricsCollector()}
+	}, metrics: newMetricsCollector()}
 
 	snap := c.blockedSnapshot()
 	if len(snap) != 2 {
@@ -276,7 +276,7 @@ func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
 	if len(snap) != 1 || snap[0].Topic != "t1" || snap[0].Partition != 1 {
 		t.Fatalf("after dropBlockedFor(p0): %+v, want only t1/1", snap)
 	}
-	if m := c.metrics.GetMetrics(); len(m.BlockedPartitions) != 1 || m.BlockedPartitions[0].Partition != 1 {
+	if m := c.metrics.getMetrics(); len(m.BlockedPartitions) != 1 || m.BlockedPartitions[0].Partition != 1 {
 		t.Errorf("metrics blocked partitions = %+v, want [t1/1]", m.BlockedPartitions)
 	}
 	c.dropBlockedFor([]ckafka.TopicPartition{{Partition: 7}}) // nil Topic must be skipped, not panic
@@ -290,7 +290,7 @@ func TestBlockedSnapshotAndDropBlockedFor(t *testing.T) {
 func TestClearBlockedOnPark(t *testing.T) {
 	c := &Consumer{blocked: map[TopicPartition]blockState{
 		{Topic: "t", Partition: 0}: {retryAt: time.Now(), blocks: 3, offset: 5},
-	}, metrics: NewDLQMetricsCollector()}
+	}, metrics: newMetricsCollector()}
 
 	c.clearBlockedOnPark(&Message{Topic: "t", Partition: 0, Offset: 4})
 	if len(c.blockedSnapshot()) != 1 {
@@ -300,7 +300,7 @@ func TestClearBlockedOnPark(t *testing.T) {
 	if len(c.blockedSnapshot()) != 0 {
 		t.Error("park at the blocked offset must clear state")
 	}
-	if got := c.metrics.GetMetrics().BlockedPartitions; len(got) != 0 {
+	if got := c.metrics.getMetrics().BlockedPartitions; len(got) != 0 {
 		t.Errorf("blocked gauge = %+v, want drained", got)
 	}
 }

@@ -253,13 +253,13 @@ func ConsumerWithRawConfig(raw map[string]any) ConsumerOption {
 // newDefaultConsumerConfig creates a new consumer config with default values
 func newDefaultConsumerConfig() *ConsumerConfig {
 	return &ConsumerConfig{
-		SessionTimeout:     DefaultSessionTimeout,
-		HeartbeatInterval:  DefaultHeartbeatInterval,
-		BatchSize:          DefaultBatchSize,
-		BatchTimeout:       DefaultBatchTimeout,
-		IdempotencyTTL:     DefaultIdempotencyTTL,
+		SessionTimeout:     defaultSessionTimeout,
+		HeartbeatInterval:  defaultHeartbeatInterval,
+		BatchSize:          defaultBatchSize,
+		BatchTimeout:       defaultBatchTimeout,
+		IdempotencyTTL:     defaultIdempotencyTTL,
 		AutoCommit:         true,
-		AutoCommitInterval: DefaultAutoCommitInterval,
+		AutoCommitInterval: defaultAutoCommitInterval,
 		PartitionAssignor:  AssignorRange,
 	}
 }

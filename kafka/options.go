@@ -64,19 +64,18 @@ type ProducerOption func(*ProducerConfig)
 
 // Default values
 const (
-	DefaultConnectionTimeout    = 10 * time.Second
-	DefaultRequestTimeout       = 30 * time.Second
-	DefaultSessionTimeout       = 30 * time.Second
-	DefaultHeartbeatInterval    = 3 * time.Second
-	DefaultRebalanceTimeout     = 0 // max.poll.interval.ms is only set when explicit (Task 9)
-	DefaultBatchSize            = 100
-	DefaultBatchTimeout         = 5 * time.Second
-	DefaultIdempotencyTTL       = 1 * time.Hour
-	DefaultAutoCommitInterval   = 5 * time.Second
-	DefaultRetryMaxRetries      = 3
-	DefaultRetryInitialInterval = 1 * time.Second
-	DefaultRetryMultiplier      = 2.0
-	DefaultRetryMaxInterval     = 30 * time.Second
+	defaultConnectionTimeout    = 10 * time.Second
+	defaultRequestTimeout       = 30 * time.Second
+	defaultSessionTimeout       = 30 * time.Second
+	defaultHeartbeatInterval    = 3 * time.Second
+	defaultBatchSize            = 100
+	defaultBatchTimeout         = 5 * time.Second
+	defaultIdempotencyTTL       = 1 * time.Hour
+	defaultAutoCommitInterval   = 5 * time.Second
+	defaultRetryMaxRetries      = 3
+	defaultRetryInitialInterval = 1 * time.Second
+	defaultRetryMultiplier      = 2.0
+	defaultRetryMaxInterval     = 30 * time.Second
 )
 
 // ==================== Producer Options ====================
@@ -179,8 +178,8 @@ func ProducerWithDeliveryErrorHandler(h func(msg *Message, err error)) ProducerO
 // newDefaultProducerConfig creates a new producer config with default values
 func newDefaultProducerConfig() *ProducerConfig {
 	return &ProducerConfig{
-		ConnectionTimeout: DefaultConnectionTimeout,
-		RequestTimeout:    DefaultRequestTimeout,
+		ConnectionTimeout: defaultConnectionTimeout,
+		RequestTimeout:    defaultRequestTimeout,
 		Acks:              AcksAll,
 		Compression:       CompressionNone,
 	}

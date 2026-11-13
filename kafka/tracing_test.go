@@ -23,11 +23,11 @@ func TestTracingServiceInjectsWithoutGlobalPropagator(t *testing.T) {
 	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
 
-	svc := NewTracingService(&TracingConfig{Enabled: true})
-	spanCtx, end := svc.StartProducerSpan(context.Background(), "t", &Message{})
+	svc := newTracingService(&TracingConfig{Enabled: true})
+	spanCtx, end := svc.startProducerSpan(context.Background(), "t", &Message{})
 
 	km := &ckafka.Message{}
-	svc.InjectTraceContext(spanCtx, km)
+	svc.injectTraceContext(spanCtx, km)
 	end(nil)
 
 	var found bool

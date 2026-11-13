@@ -16,7 +16,7 @@ import (
 type Consumer struct {
 	consumer *ckafka.Consumer
 	config   *ConsumerConfig
-	tracer   *TracingService
+	tracer   *tracingService
 	logger   *slog.Logger
 
 	// Handlers
@@ -41,11 +41,11 @@ type Consumer struct {
 	batch   []*Message
 
 	// Idempotency
-	idempotencyStore *IdempotencyStore
+	idempotencyStore *idempotencyStore
 
 	// DLQ
-	dlqService *DLQService
-	metrics    *DLQMetricsCollector
+	dlqService *dlqService
+	metrics    *metricsCollector
 
 	// after is the sleep seam for retry waits; tests swap it to make
 	// backoff cycles instantaneous. Defaults to time.After.
@@ -100,19 +100,19 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 		done:     make(chan struct{}),
 		flushCh:  make(chan struct{}, 1),
 		batch:    make([]*Message, 0, config.BatchSize),
-		metrics:  NewDLQMetricsCollector(),
+		metrics:  newMetricsCollector(),
 		blocked:  make(map[TopicPartition]blockState),
 		after:    time.After,
 	}
 
 	// Initialize tracing if enabled
 	if config.Tracing != nil && config.Tracing.Enabled {
-		kc.tracer = NewTracingService(config.Tracing)
+		kc.tracer = newTracingService(config.Tracing)
 	}
 
 	// Initialize idempotency store if configured
 	if config.IdempotencyKey != nil {
-		kc.idempotencyStore = NewIdempotencyStore(config.IdempotencyTTL)
+		kc.idempotencyStore = newIdempotencyStore(config.IdempotencyTTL)
 	}
 
 	// Initialize DLQ service if configured
@@ -260,7 +260,7 @@ func (c *Consumer) Close(ctx context.Context) error {
 
 	// Close idempotency store
 	if c.idempotencyStore != nil {
-		c.idempotencyStore.Close()
+		c.idempotencyStore.close()
 	}
 
 	return c.consumer.Close()
@@ -310,7 +310,7 @@ func boolToInt32(b bool) int32 {
 
 // DLQMetrics returns DLQ metrics
 func (c *Consumer) DLQMetrics() *DLQMetrics {
-	return c.metrics.GetMetrics()
+	return c.metrics.getMetrics()
 }
 
 // convertMessage converts ckafka.Message to Message
@@ -349,7 +349,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	var idempotencyKey string
 	if c.idempotencyStore != nil && c.config.IdempotencyKey != nil {
 		idempotencyKey = c.config.IdempotencyKey(msg)
-		if idempotencyKey != "" && c.idempotencyStore.IsDuplicate(idempotencyKey) {
+		if idempotencyKey != "" && c.idempotencyStore.isDuplicate(idempotencyKey) {
 			c.logger.Debug("skipping duplicate message", "key", idempotencyKey)
 			return outcomeParked
 		}
@@ -358,7 +358,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 	// Start tracing span
 	var endSpan func(error)
 	if c.tracer != nil {
-		ctx, endSpan = c.tracer.StartConsumerSpan(ctx, c.config.GroupID, msg)
+		ctx, endSpan = c.tracer.startConsumerSpan(ctx, c.config.GroupID, msg)
 	}
 
 	// Execute handler with retry
@@ -372,7 +372,7 @@ func (c *Consumer) processMessage(ctx context.Context, msg *Message) outcome {
 		// skipped on error; the offset is not stored either (the partition
 		// blocks), so the message will be redelivered.
 		if c.idempotencyStore != nil && idempotencyKey != "" {
-			c.idempotencyStore.Add(idempotencyKey)
+			c.idempotencyStore.add(idempotencyKey)
 		}
 		return outcomeParked
 	}
@@ -403,10 +403,10 @@ func (c *Consumer) deliver(ctx context.Context, msg *Message) {
 // executeWithRetry executes the handler with retry logic. The returned
 // attempts count handler invocations (1 = first try, no retry).
 func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, error) {
-	maxRetries := DefaultRetryMaxRetries
-	initialInterval := DefaultRetryInitialInterval
-	multiplier := DefaultRetryMultiplier
-	maxInterval := DefaultRetryMaxInterval
+	maxRetries := defaultRetryMaxRetries
+	initialInterval := defaultRetryInitialInterval
+	multiplier := defaultRetryMultiplier
+	maxInterval := defaultRetryMaxInterval
 	skipOnMaxRetries := false
 
 	if c.config.Retry != nil {
@@ -435,7 +435,7 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 		}
 
 		lastErr = err
-		c.metrics.IncrementHandlerRetries(msg.Topic)
+		c.metrics.incrementHandlerRetries(msg.Topic)
 
 		if attempt < maxRetries {
 			c.logger.Debug("retrying message", "attempt", attempt+1, "maxRetries", maxRetries, "error", err)
@@ -509,7 +509,7 @@ func (c *Consumer) processBatch(ctx context.Context) outcome {
 	// Start tracing span
 	var endSpan func(error)
 	if c.tracer != nil && len(batch) > 0 {
-		ctx, endSpan = c.tracer.StartBatchConsumerSpan(ctx, c.config.GroupID, batch)
+		ctx, endSpan = c.tracer.startBatchConsumerSpan(ctx, c.config.GroupID, batch)
 	}
 
 	var processingErr error
@@ -746,7 +746,7 @@ func (c *Consumer) blockMessages(_ context.Context, msgs []*Message) {
 			"blocks", bs.blocks, "retryIn", blockBackoff(bs.blocks, c.config.Retry))
 	}
 	c.blockMu.Unlock()
-	c.metrics.SetBlocked(c.blockedSnapshot())
+	c.metrics.setBlocked(c.blockedSnapshot())
 	if err := c.consumer.Pause(paused); err != nil {
 		c.logger.Error("pause failed for blocked partition (next pass re-attempts)", "error", err)
 	}
@@ -818,7 +818,7 @@ func (c *Consumer) clearBlockedOnPark(msg *Message) {
 	}
 	c.blockMu.Unlock()
 	if cleared {
-		c.metrics.SetBlocked(c.blockedSnapshot())
+		c.metrics.setBlocked(c.blockedSnapshot())
 	}
 }
 
@@ -843,7 +843,7 @@ func (c *Consumer) dropBlockedFor(ps []ckafka.TopicPartition) {
 		delete(c.blocked, TopicPartition{Topic: *tp.Topic, Partition: tp.Partition})
 	}
 	c.blockMu.Unlock()
-	c.metrics.SetBlocked(c.blockedSnapshot())
+	c.metrics.setBlocked(c.blockedSnapshot())
 }
 
 // convertPartitions converts ckafka.TopicPartition to our TopicPartition type
@@ -885,7 +885,7 @@ func commitOffsets(msgs []*Message) []ckafka.TopicPartition {
 // retryBudget returns the worst-case wall time of one executeWithRetry cycle
 // (all sleeps, no handler time). Feeds the max.poll.interval.ms floor.
 func retryBudget(r *RetryConfig) time.Duration {
-	maxRetries, initial, multiplier, maxInterval := DefaultRetryMaxRetries, DefaultRetryInitialInterval, DefaultRetryMultiplier, DefaultRetryMaxInterval
+	maxRetries, initial, multiplier, maxInterval := defaultRetryMaxRetries, defaultRetryInitialInterval, defaultRetryMultiplier, defaultRetryMaxInterval
 	if r != nil {
 		if r.MaxRetries > 0 {
 			maxRetries = r.MaxRetries
@@ -917,7 +917,7 @@ func retryBudget(r *RetryConfig) time.Duration {
 // resumed: InitialInterval doubling per consecutive block of the same message,
 // capped at MaxInterval, reset when the message finally parks.
 func blockBackoff(blocks int, r *RetryConfig) time.Duration {
-	initial, maxInterval := DefaultRetryInitialInterval, DefaultRetryMaxInterval
+	initial, maxInterval := defaultRetryInitialInterval, defaultRetryMaxInterval
 	if r != nil {
 		if r.InitialInterval > 0 {
 			initial = r.InitialInterval

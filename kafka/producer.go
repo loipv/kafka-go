@@ -16,7 +16,7 @@ import (
 type Producer struct {
 	producer *ckafka.Producer
 	config   *ProducerConfig
-	tracer   *TracingService
+	tracer   *tracingService
 	logger   *slog.Logger
 	closed   int32 // atomic: 0=open, 1=closed
 
@@ -60,7 +60,7 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 
 	// Initialize tracing if enabled
 	if config.Tracing != nil && config.Tracing.Enabled {
-		client.tracer = NewTracingService(config.Tracing)
+		client.tracer = newTracingService(config.Tracing)
 	}
 
 	// Start delivery report handler
@@ -93,8 +93,8 @@ func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Messa
 func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Message) *ckafka.Message {
 	km := p.buildKafkaMessage(topic, msg)
 	if p.tracer != nil {
-		msgCtx, end := p.tracer.StartProducerSpan(ctx, topic, msg)
-		p.tracer.InjectTraceContext(msgCtx, km)
+		msgCtx, end := p.tracer.startProducerSpan(ctx, topic, msg)
+		p.tracer.injectTraceContext(msgCtx, km)
 		km.Opaque = end
 	}
 	return km

@@ -12,17 +12,17 @@ import (
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// DLQService handles Dead Letter Queue operations
-type DLQService struct {
+// dlqService handles Dead Letter Queue operations
+type dlqService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
-	metrics  *DLQMetricsCollector
+	metrics  *metricsCollector
 	closed   int32 // atomic: 0=open, 1=closed
 }
 
 // newDLQService creates a new DLQ service. It builds its producer from the
 // same connConfig as the parent consumer, so SSL/SASL is never dropped.
-func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollector) (*DLQService, error) {
+func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) (*dlqService, error) {
 	cm := cc.configMap()
 	cm["acks"] = -1 // All replicas
 
@@ -31,7 +31,7 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 		return nil, fmt.Errorf("failed to create DLQ producer: %w", err)
 	}
 
-	return &DLQService{
+	return &dlqService{
 		producer: producer,
 		config:   config,
 		metrics:  metrics,
@@ -42,7 +42,7 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *DLQMetricsCollecto
 // is never mutated — DLQ headers go on a shallow copy. The produce is a
 // single attempt confirmed by a delivery report; the caller decides what a
 // failure means (the partition blocks).
-func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
+func (s *dlqService) produceToDLQ(ctx context.Context, msg *Message, err error, attempts int) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return ErrDLQClosed
 	}
@@ -60,7 +60,7 @@ func (s *DLQService) produceToDLQ(ctx context.Context, msg *Message, err error, 
 }
 
 // produceToTopic sends a message to a specific topic
-func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Message) error {
+func (s *dlqService) produceToTopic(ctx context.Context, topic string, msg *Message) error {
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return ErrDLQClosed
 	}
@@ -94,7 +94,7 @@ func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Mess
 		if m, ok := e.(*ckafka.Message); ok && m.TopicPartition.Error != nil {
 			return fmt.Errorf("DLQ delivery failed: %w", m.TopicPartition.Error)
 		}
-		s.metrics.IncrementSentToDLQ(topic)
+		s.metrics.incrementSentToDLQ(topic)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -102,7 +102,7 @@ func (s *DLQService) produceToTopic(ctx context.Context, topic string, msg *Mess
 }
 
 // Close closes the DLQ service
-func (s *DLQService) Close() error {
+func (s *dlqService) Close() error {
 	// Use atomic CAS to ensure only one Close can succeed
 	if !atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
 		return nil
@@ -113,24 +113,24 @@ func (s *DLQService) Close() error {
 	return nil
 }
 
-// DLQMetricsCollector collects DLQ metrics
-type DLQMetricsCollector struct {
+// metricsCollector collects DLQ metrics
+type metricsCollector struct {
 	global  DLQGlobalMetrics
 	byTopic map[string]*DLQTopicMetrics
 	blocked []TopicPartition
 	mu      sync.RWMutex
 }
 
-// NewDLQMetricsCollector creates a new metrics collector
-func NewDLQMetricsCollector() *DLQMetricsCollector {
-	return &DLQMetricsCollector{
+// newMetricsCollector creates a new metrics collector
+func newMetricsCollector() *metricsCollector {
+	return &metricsCollector{
 		byTopic: make(map[string]*DLQTopicMetrics),
 	}
 }
 
 // getOrCreateTopicMetrics returns existing topic metrics or creates new one
 // Uses double-checked locking for optimal performance
-func (m *DLQMetricsCollector) getOrCreateTopicMetrics(topic string) *DLQTopicMetrics {
+func (m *metricsCollector) getOrCreateTopicMetrics(topic string) *DLQTopicMetrics {
 	// Fast path: check with RLock (most common case - topic already exists)
 	m.mu.RLock()
 	metrics, ok := m.byTopic[topic]
@@ -154,29 +154,29 @@ func (m *DLQMetricsCollector) getOrCreateTopicMetrics(topic string) *DLQTopicMet
 	return metrics
 }
 
-// IncrementHandlerRetries increments handler retry count
-func (m *DLQMetricsCollector) IncrementHandlerRetries(topic string) {
+// incrementHandlerRetries increments handler retry count
+func (m *metricsCollector) incrementHandlerRetries(topic string) {
 	atomic.AddInt64(&m.global.HandlerRetries, 1)
 	metrics := m.getOrCreateTopicMetrics(topic)
 	atomic.AddInt64(&metrics.HandlerRetries, 1)
 }
 
-// IncrementSentToDLQ increments sent to DLQ count
-func (m *DLQMetricsCollector) IncrementSentToDLQ(topic string) {
+// incrementSentToDLQ increments sent to DLQ count
+func (m *metricsCollector) incrementSentToDLQ(topic string) {
 	atomic.AddInt64(&m.global.MessagesSentToDLQ, 1)
 	metrics := m.getOrCreateTopicMetrics(topic)
 	atomic.AddInt64(&metrics.SentToDLQ, 1)
 }
 
-// SetBlocked stores an atomic snapshot of the currently blocked partitions.
-func (m *DLQMetricsCollector) SetBlocked(tps []TopicPartition) {
+// setBlocked stores an atomic snapshot of the currently blocked partitions.
+func (m *metricsCollector) setBlocked(tps []TopicPartition) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.blocked = tps
 }
 
-// GetMetrics returns all metrics
-func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
+// getMetrics returns all metrics
+func (m *metricsCollector) getMetrics() *DLQMetrics {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -198,8 +198,8 @@ func (m *DLQMetricsCollector) GetMetrics() *DLQMetrics {
 	}
 }
 
-// IdempotencyStore stores processed message keys for idempotency
-type IdempotencyStore struct {
+// idempotencyStore stores processed message keys for idempotency
+type idempotencyStore struct {
 	store     map[string]time.Time
 	ttl       time.Duration
 	mu        sync.RWMutex
@@ -208,12 +208,12 @@ type IdempotencyStore struct {
 	closeOnce sync.Once
 }
 
-// NewIdempotencyStore creates a new idempotency store
-func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
+// newIdempotencyStore creates a new idempotency store
+func newIdempotencyStore(ttl time.Duration) *idempotencyStore {
 	if ttl <= 0 { // time.NewTicker(0) panics — clamp instead
-		ttl = DefaultIdempotencyTTL
+		ttl = defaultIdempotencyTTL
 	}
-	s := &IdempotencyStore{
+	s := &idempotencyStore{
 		store:  make(map[string]time.Time),
 		ttl:    ttl,
 		done:   make(chan struct{}),
@@ -225,15 +225,15 @@ func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
 	return s
 }
 
-// Add adds a key to the store
-func (s *IdempotencyStore) Add(key string) {
+// add adds a key to the store
+func (s *idempotencyStore) add(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.store[key] = time.Now()
 }
 
-// IsDuplicate checks if a key is a duplicate
-func (s *IdempotencyStore) IsDuplicate(key string) bool {
+// isDuplicate checks if a key is a duplicate
+func (s *idempotencyStore) isDuplicate(key string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -245,8 +245,8 @@ func (s *IdempotencyStore) IsDuplicate(key string) bool {
 	return false
 }
 
-// Close closes the idempotency store. Safe to call more than once.
-func (s *IdempotencyStore) Close() {
+// close closes the idempotency store. Safe to call more than once.
+func (s *idempotencyStore) close() {
 	s.closeOnce.Do(func() {
 		close(s.done)
 		s.ticker.Stop()
@@ -254,7 +254,7 @@ func (s *IdempotencyStore) Close() {
 }
 
 // cleanup periodically removes expired entries
-func (s *IdempotencyStore) cleanup() {
+func (s *idempotencyStore) cleanup() {
 	for {
 		select {
 		case <-s.done:

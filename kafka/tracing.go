@@ -14,26 +14,26 @@ import (
 
 // Semantic convention attributes for messaging
 const (
-	MessagingSystemKey              = "messaging.system"
-	MessagingDestinationNameKey     = "messaging.destination.name"
-	MessagingDestinationPartitionID = "messaging.destination.partition.id"
-	MessagingOperationNameKey       = "messaging.operation.name"
-	MessagingOperationTypeKey       = "messaging.operation.type"
-	MessagingKafkaOffsetKey         = "messaging.kafka.offset"
-	MessagingConsumerGroupKey       = "messaging.kafka.consumer.group"
-	MessagingKafkaMessageKeyKey     = "messaging.kafka.message.key"
-	MessagingBatchMessageCountKey   = "messaging.batch.message_count"
+	messagingSystemKey              = "messaging.system"
+	messagingDestinationNameKey     = "messaging.destination.name"
+	messagingDestinationPartitionID = "messaging.destination.partition.id"
+	messagingOperationNameKey       = "messaging.operation.name"
+	messagingOperationTypeKey       = "messaging.operation.type"
+	messagingKafkaOffsetKey         = "messaging.kafka.offset"
+	messagingConsumerGroupKey       = "messaging.kafka.consumer.group"
+	messagingKafkaMessageKeyKey     = "messaging.kafka.message.key"
+	messagingBatchMessageCountKey   = "messaging.batch.message_count"
 )
 
-// TracingService provides OpenTelemetry tracing for Kafka operations
-type TracingService struct {
+// tracingService provides OpenTelemetry tracing for Kafka operations
+type tracingService struct {
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 	config     *TracingConfig
 }
 
-// NewTracingService creates a new tracing service
-func NewTracingService(config *TracingConfig) *TracingService {
+// newTracingService creates a new tracing service
+func newTracingService(config *TracingConfig) *tracingService {
 	tracerName := config.TracerName
 	if tracerName == "" {
 		tracerName = "github.com/loipv/kafka-go"
@@ -44,7 +44,7 @@ func NewTracingService(config *TracingConfig) *TracingService {
 		tracerVersion = Version
 	}
 
-	return &TracingService{
+	return &tracingService{
 		tracer:     otel.Tracer(tracerName, trace.WithInstrumentationVersion(tracerVersion)),
 		propagator: defaultPropagator(),
 		config:     config,
@@ -62,23 +62,23 @@ func defaultPropagator() propagation.TextMapPropagator {
 	return p
 }
 
-// StartProducerSpan starts a new span for producing a message
-func (t *TracingService) StartProducerSpan(ctx context.Context, topic string, msg *Message) (context.Context, func(error)) {
+// startProducerSpan starts a new span for producing a message
+func (t *tracingService) startProducerSpan(ctx context.Context, topic string, msg *Message) (context.Context, func(error)) {
 	spanName := fmt.Sprintf("%s publish", topic)
 
 	ctx, span := t.tracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
-			attribute.String(MessagingSystemKey, "kafka"),
-			attribute.String(MessagingDestinationNameKey, topic),
-			attribute.String(MessagingOperationNameKey, "publish"),
-			attribute.String(MessagingOperationTypeKey, "publish"),
+			attribute.String(messagingSystemKey, "kafka"),
+			attribute.String(messagingDestinationNameKey, topic),
+			attribute.String(messagingOperationNameKey, "publish"),
+			attribute.String(messagingOperationTypeKey, "publish"),
 		),
 	)
 
 	// Add message key if present
 	if msg.Key != nil {
-		span.SetAttributes(attribute.String(MessagingKafkaMessageKeyKey, string(msg.Key)))
+		span.SetAttributes(attribute.String(messagingKafkaMessageKeyKey, string(msg.Key)))
 	}
 
 	return ctx, func(err error) {
@@ -90,29 +90,29 @@ func (t *TracingService) StartProducerSpan(ctx context.Context, topic string, ms
 	}
 }
 
-// StartConsumerSpan starts a new span for consuming a message
-func (t *TracingService) StartConsumerSpan(ctx context.Context, groupID string, msg *Message) (context.Context, func(error)) {
+// startConsumerSpan starts a new span for consuming a message
+func (t *tracingService) startConsumerSpan(ctx context.Context, groupID string, msg *Message) (context.Context, func(error)) {
 	// Extract trace context from message headers
-	ctx = t.ExtractTraceContext(ctx, msg)
+	ctx = t.extractTraceContext(ctx, msg)
 
 	spanName := fmt.Sprintf("%s %s process", groupID, msg.Topic)
 
 	ctx, span := t.tracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
-			attribute.String(MessagingSystemKey, "kafka"),
-			attribute.String(MessagingDestinationNameKey, msg.Topic),
-			attribute.Int(MessagingDestinationPartitionID, int(msg.Partition)),
-			attribute.String(MessagingOperationNameKey, "process"),
-			attribute.String(MessagingOperationTypeKey, "process"),
-			attribute.Int64(MessagingKafkaOffsetKey, msg.Offset),
-			attribute.String(MessagingConsumerGroupKey, groupID),
+			attribute.String(messagingSystemKey, "kafka"),
+			attribute.String(messagingDestinationNameKey, msg.Topic),
+			attribute.Int(messagingDestinationPartitionID, int(msg.Partition)),
+			attribute.String(messagingOperationNameKey, "process"),
+			attribute.String(messagingOperationTypeKey, "process"),
+			attribute.Int64(messagingKafkaOffsetKey, msg.Offset),
+			attribute.String(messagingConsumerGroupKey, groupID),
 		),
 	)
 
 	// Add message key if present
 	if msg.Key != nil {
-		span.SetAttributes(attribute.String(MessagingKafkaMessageKeyKey, string(msg.Key)))
+		span.SetAttributes(attribute.String(messagingKafkaMessageKeyKey, string(msg.Key)))
 	}
 
 	return ctx, func(err error) {
@@ -124,8 +124,8 @@ func (t *TracingService) StartConsumerSpan(ctx context.Context, groupID string, 
 	}
 }
 
-// StartBatchConsumerSpan starts a new span for consuming a batch of messages
-func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID string, msgs []*Message) (context.Context, func(error)) {
+// startBatchConsumerSpan starts a new span for consuming a batch of messages
+func (t *tracingService) startBatchConsumerSpan(ctx context.Context, groupID string, msgs []*Message) (context.Context, func(error)) {
 	if len(msgs) == 0 {
 		return ctx, func(error) {}
 	}
@@ -135,12 +135,12 @@ func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID str
 	spanName := fmt.Sprintf("%s %s process batch", groupID, topic)
 
 	// Extract trace context from first message for parent span
-	ctx = t.ExtractTraceContext(ctx, msgs[0])
+	ctx = t.extractTraceContext(ctx, msgs[0])
 
 	// Collect links from other messages
 	var links []trace.Link
 	for i := 1; i < len(msgs); i++ {
-		msgCtx := t.ExtractTraceContext(context.Background(), msgs[i])
+		msgCtx := t.extractTraceContext(context.Background(), msgs[i])
 		spanCtx := trace.SpanContextFromContext(msgCtx)
 		if spanCtx.IsValid() {
 			links = append(links, trace.Link{
@@ -156,12 +156,12 @@ func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID str
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithLinks(links...),
 		trace.WithAttributes(
-			attribute.String(MessagingSystemKey, "kafka"),
-			attribute.String(MessagingDestinationNameKey, topic),
-			attribute.String(MessagingOperationNameKey, "process"),
-			attribute.String(MessagingOperationTypeKey, "process"),
-			attribute.String(MessagingConsumerGroupKey, groupID),
-			attribute.Int(MessagingBatchMessageCountKey, len(msgs)),
+			attribute.String(messagingSystemKey, "kafka"),
+			attribute.String(messagingDestinationNameKey, topic),
+			attribute.String(messagingOperationNameKey, "process"),
+			attribute.String(messagingOperationTypeKey, "process"),
+			attribute.String(messagingConsumerGroupKey, groupID),
+			attribute.Int(messagingBatchMessageCountKey, len(msgs)),
 		),
 	)
 
@@ -174,14 +174,14 @@ func (t *TracingService) StartBatchConsumerSpan(ctx context.Context, groupID str
 	}
 }
 
-// InjectTraceContext injects trace context into Kafka message headers
-func (t *TracingService) InjectTraceContext(ctx context.Context, msg *ckafka.Message) {
+// injectTraceContext injects trace context into Kafka message headers
+func (t *tracingService) injectTraceContext(ctx context.Context, msg *ckafka.Message) {
 	carrier := &kafkaHeaderCarrier{msg: msg}
 	t.propagator.Inject(ctx, carrier)
 }
 
-// ExtractTraceContext extracts trace context from message headers
-func (t *TracingService) ExtractTraceContext(ctx context.Context, msg *Message) context.Context {
+// extractTraceContext extracts trace context from message headers
+func (t *tracingService) extractTraceContext(ctx context.Context, msg *Message) context.Context {
 	carrier := &messageHeaderCarrier{msg: msg}
 	return t.propagator.Extract(ctx, carrier)
 }

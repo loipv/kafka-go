@@ -148,7 +148,7 @@ func TestDLQConn(t *testing.T) {
 func TestBuildConsumerConfig(t *testing.T) {
 	base := func() *ConsumerConfig {
 		return &ConsumerConfig{Brokers: []string{"b:9092"}, GroupID: "g", Topics: []string{"t"},
-			SessionTimeout: DefaultSessionTimeout}
+			SessionTimeout: defaultSessionTimeout}
 	}
 	t.Run("auto offset store is always off (at-least-once)", func(t *testing.T) {
 		cm, err := buildConsumerConfig(base())
