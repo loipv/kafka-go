@@ -649,6 +649,9 @@ func (c *Consumer) groupByKey(msgs []*Message) []GroupedBatch {
 // batch is unparkable (no DLQ for an unclaimed message, or the DLQ produce
 // failed). The batch handler runs once — no executeWithRetry — so attempts is 1.
 func (c *Consumer) handleBatchError(ctx context.Context, err error, batch []*Message) bool {
+	for _, msg := range batch {
+		c.metrics.incHandlerFailures(msg.Topic)
+	}
 	unclaimed := batch
 	if c.config.ErrorHandler != nil {
 		unclaimed = make([]*Message, 0, len(batch))

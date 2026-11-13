@@ -584,14 +584,34 @@ func TestConsumer_BatchIdempotencySkipsProcessedKeys(t *testing.T) {
 func TestConsumer_HandleBatchErrorHonoursErrorHandler(t *testing.T) {
 	batch := []*Message{{Topic: "t"}, {Topic: "t"}}
 	discard := slog.New(slog.DiscardHandler)
-	claimAll := &Consumer{logger: discard, config: &ConsumerConfig{
+	claimAll := &Consumer{logger: discard, metrics: newMetricsCollector(), config: &ConsumerConfig{
 		ErrorHandler: func(context.Context, *Message, error) error { return nil }}}
 	if claimAll.handleBatchError(context.Background(), errors.New("boom"), batch) {
 		t.Error("blocked = true, want false: the error handler took ownership of every message")
 	}
-	none := &Consumer{logger: discard, config: &ConsumerConfig{}}
+	none := &Consumer{logger: discard, metrics: newMetricsCollector(), config: &ConsumerConfig{}}
 	if !none.handleBatchError(context.Background(), errors.New("boom"), batch) {
 		t.Error("blocked = false, want true: no error handler and no DLQ")
+	}
+}
+
+func TestConsumer_HandleBatchErrorCountsHandlerFailures(t *testing.T) {
+	c := &Consumer{
+		config: &ConsumerConfig{
+			ErrorHandler: func(context.Context, *Message, error) error { return nil },
+		},
+		logger:  slog.New(slog.DiscardHandler),
+		metrics: newMetricsCollector(),
+	}
+	batch := []*Message{{Topic: "t1"}, {Topic: "t1"}, {Topic: "t2"}}
+	c.handleBatchError(context.Background(), errors.New("boom"), batch)
+
+	m := c.Metrics()
+	if m.HandlerFailures != 3 {
+		t.Errorf("HandlerFailures = %d, want 3 (one per message of the failed batch)", m.HandlerFailures)
+	}
+	if m.ByTopic["t1"].HandlerFailures != 2 || m.ByTopic["t2"].HandlerFailures != 1 {
+		t.Errorf("ByTopic = %+v, want t1:2 t2:1", m.ByTopic)
 	}
 }
 
