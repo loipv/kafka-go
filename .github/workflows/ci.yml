@@ -47,3 +47,12 @@ jobs:
       - uses: actions/setup-go@v5
         with: {go-version-file: go.mod, cache: true}
       - run: make vuln
+  release:
+    # Runs last and only for pushes to main: the release PR is refreshed and a
+    # merged one is tagged only when the commit passed every other job.
+    if: github.event_name == 'push'
+    needs: [test, lint, integration, vuln]
+    runs-on: ubuntu-latest
+    permissions: {contents: write, issues: write, pull-requests: write}
+    steps:
+      - uses: googleapis/release-please-action@v4
