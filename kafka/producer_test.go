@@ -482,3 +482,74 @@ func TestProducer_ConcurrentProduceAndClose(t *testing.T) {
 		}
 	}
 }
+
+// downProducer returns a producer whose broker is unreachable, with Close's
+// flush shortened so tests do not wait out the default.
+func downProducer(t *testing.T, opts ...ProducerOption) (*Producer, string) {
+	t.Helper()
+	old := closeFlushTimeout
+	closeFlushTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { closeFlushTimeout = old })
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(append([]ProducerOption{ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	return p, topic
+}
+
+// Close must not destroy the client under a Flush that is still running: it
+// waits for that Flush to return.
+func TestProducer_CloseWaitsForRunningFlush(t *testing.T) {
+	skipIfShort(t)
+	p, topic := downProducer(t)
+	if err := p.ProduceAsync(topic, &Message{Value: []byte("stuck")}); err != nil {
+		t.Fatalf("ProduceAsync: %v", err)
+	}
+	flushed := make(chan struct{})
+	go func() {
+		defer close(flushed)
+		_ = p.Flush(1500 * time.Millisecond) // cannot drain: the broker is down
+	}()
+	time.Sleep(200 * time.Millisecond) // Flush is inside the client
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	select {
+	case <-flushed:
+	default:
+		t.Error("Close returned while Flush was still using the client")
+	}
+}
+
+// A ProduceBatch stuck in back-pressure (queue full, nothing draining) when
+// Close ends must return ErrProducerClosed instead of waiting for its context.
+func TestProducer_BatchInBackPressureReturnsClosedAfterClose(t *testing.T) {
+	skipIfShort(t)
+	p, topic := downProducer(t, ProducerWithRawConfig(map[string]any{"queue.buffering.max.messages": 1}))
+	done := make(chan error, 1)
+	go func() {
+		done <- p.ProduceBatch(context.Background(), topic,
+			[]*Message{{Value: []byte("a")}, {Value: []byte("b")}, {Value: []byte("c")}})
+	}()
+	waitFor(t, 5*time.Second, func() bool { return p.producer.Len() > 0 }, "the first message was never queued")
+	time.Sleep(100 * time.Millisecond) // the second message is now waiting for room
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProducerClosed) {
+			t.Errorf("ProduceBatch() = %v, want an error wrapping ErrProducerClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProduceBatch did not return within 5s of Close")
+	}
+}
