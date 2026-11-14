@@ -145,6 +145,13 @@ related). Delivery stays at-least-once.
   another member (duplicate processing), and a failure then listed that
   partition in `BlockedPartitions` for good. They are now dropped at the revoke
   and redelivered to the partition's next owner.
+- A rebalance callback that returned an error on a revoke left the revoked
+  partitions' blocked state behind (and, in batch modes, their pending
+  messages), although the client revokes the partitions all the same. Both are
+  now dropped whatever the callback returns; the error still skips the
+  library's commit before the revoke.
+- `ProduceBatch` could name `ErrProducerClosed` twice in its error when `Close`
+  cut the batch short while it was being queued.
 - The DLQ producer closed silently with messages still queued, and an unread
   error event from an earlier broker outage made that close wait its whole
   10-second flush timeout with nothing to deliver. `Consumer.Close` now logs a

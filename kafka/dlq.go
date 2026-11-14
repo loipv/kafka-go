@@ -39,8 +39,13 @@ type dlqService struct {
 	config   *DLQConfig
 	metrics  *metricsCollector
 	logger   *slog.Logger
-	closed   atomic.Bool   // true once closed
-	done     chan struct{} // closed at the start of Close: releases waiting produces
+	closed   atomic.Bool // true once closed
+
+	// done is closed at the start of Close. The consumer closes the service
+	// only after its poll loop has stopped, so no produce is waiting by then;
+	// the arm on it in produceAll is a guard against a hang should that order
+	// ever change.
+	done chan struct{}
 }
 
 // dlqDeliveryTimeout bounds how long the poll loop waits for a DLQ delivery
