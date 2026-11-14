@@ -354,6 +354,13 @@ func (c *Consumer) Close(ctx context.Context) error {
 		}
 	}
 
+	return c.teardown(ctx)
+}
+
+// teardown flushes the batch still in memory (batch modes), then releases the
+// DLQ producer, the idempotency store and the client. It must only run once
+// the consume loop no longer uses the client.
+func (c *Consumer) teardown(ctx context.Context) error {
 	// Process remaining batch
 	if c.batchMode() {
 		c.processBatch(ctx)
