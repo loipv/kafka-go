@@ -26,7 +26,13 @@ type Producer struct {
 	logger   *slog.Logger
 	closed   atomic.Bool // true once closed
 
-	done        chan struct{}
+	// mu guards the client's lifetime: every use of producer outside Close
+	// holds it for reading and checks closed under it, and Close flips closed
+	// while holding it for writing. Once Close has the flag set, nothing else
+	// touches the client, so Close can flush and destroy it alone.
+	mu sync.RWMutex
+
+	done        chan struct{} // closed by Close after its flush: no more reports will arrive
 	wg          sync.WaitGroup
 	deliveryErr func(*Message, error)
 }
@@ -143,47 +149,61 @@ func (p *Producer) prepareMessage(ctx context.Context, topic string, msg *Messag
 // delivery reports, and returns once every queued message has reported (or
 // ctx is done). The errors.Join of all failures is the result.
 func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) error {
-	if p.closed.Load() {
-		err := ErrProducerClosed
-		for _, m := range msgs {
-			endSpan(m, err) // spans were started in prepareMessage before this check
-		}
-		return err
-	}
 	deliveryChan := make(chan ckafka.Event, len(msgs))
 	var errs []error
 	pending := 0
-	// await consumes one delivery report; it returns false when ctx is done.
-	await := func() bool {
+	// abort gives up on every message that has no report yet, with cause.
+	abort := func(cause error) error {
+		for _, m := range msgs {
+			endSpan(m, cause) // no-op for a message whose report already ended its span
+		}
+		return errors.Join(append(errs, cause)...)
+	}
+	// await consumes one delivery report. It returns a non-nil cause when the
+	// wait is over for good: ctx is done, or Close finished and no report
+	// still buffered in the channel covers what is pending.
+	await := func() error {
 		select {
 		case e := <-deliveryChan:
 			pending--
 			if err := finishDelivery(e); err != nil {
 				errs = append(errs, err)
 			}
-			return true
+			return nil
 		case <-ctx.Done():
-			return false
+			return ctx.Err()
+		case <-p.done:
+			var drained []error
+			drained, pending = drainReports(deliveryChan, pending)
+			errs = append(errs, drained...)
+			if pending > 0 {
+				return ErrProducerClosed
+			}
+			return nil
 		}
 	}
-	abort := func() error {
-		for _, m := range msgs {
-			endSpan(m, ctx.Err()) // no-op for a message whose report already ended its span
-		}
-		return errors.Join(append(errs, ctx.Err())...)
-	}
-	for _, m := range msgs {
+enqueue:
+	for i, m := range msgs {
 		for {
+			if !p.acquire() {
+				// Close won the race: this message and the rest are not queued.
+				for _, rest := range msgs[i:] {
+					endSpan(rest, ErrProducerClosed)
+				}
+				errs = append(errs, ErrProducerClosed)
+				break enqueue
+			}
 			err := p.producer.Produce(m, deliveryChan)
+			// An empty queue cannot drain, so queue-full there is permanent
+			// (e.g. the message alone exceeds queue.buffering.max.kbytes).
+			emptyQueue := err != nil && pending == 0 && p.producer.Len() == 0
+			p.mu.RUnlock()
 			if err == nil {
 				pending++
 				break
 			}
 			var kerr ckafka.Error
-			// An empty queue cannot drain, so queue-full there is permanent
-			// (e.g. the message alone exceeds queue.buffering.max.kbytes).
-			if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull ||
-				(pending == 0 && p.producer.Len() == 0) {
+			if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull || emptyQueue {
 				endSpan(m, err) // no report will ever arrive for this message
 				errs = append(errs, err)
 				break
@@ -191,23 +211,56 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 			// librdkafka's queue is full: back-pressure by draining one
 			// delivery report (or flushing) and retrying the same message.
 			if ctx.Err() != nil {
-				return abort()
+				return abort(ctx.Err())
 			}
 			if pending > 0 {
-				if !await() {
-					return abort()
+				if cause := await(); cause != nil {
+					return abort(cause)
 				}
-			} else {
+			} else if p.acquire() {
 				p.producer.Flush(100)
+				p.mu.RUnlock()
 			}
 		}
 	}
 	for pending > 0 {
-		if !await() {
-			return abort()
+		if cause := await(); cause != nil {
+			return abort(cause)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// acquire takes the client lock for reading and reports whether the producer
+// is still open. On true the caller releases it with p.mu.RUnlock(); on false
+// the lock is already released and the client must not be touched.
+func (p *Producer) acquire() bool {
+	p.mu.RLock()
+	if p.closed.Load() {
+		p.mu.RUnlock()
+		return false
+	}
+	return true
+}
+
+// drainReports consumes, without blocking, the delivery reports already
+// buffered in ch, up to pending of them. It returns their delivery errors and
+// how many of the pending messages still have no report. A report that made it
+// into the channel before Close finished is a real outcome and must not be
+// reported as ErrProducerClosed.
+func drainReports(ch <-chan ckafka.Event, pending int) (errs []error, left int) {
+	for pending > 0 {
+		select {
+		case e := <-ch:
+			pending--
+			if err := finishDelivery(e); err != nil {
+				errs = append(errs, err)
+			}
+		default:
+			return errs, pending
+		}
+	}
+	return errs, 0
 }
 
 // finishDelivery ends the span for one delivery report and returns the
@@ -258,9 +311,10 @@ func topicOf(m *ckafka.Message) string {
 // Calling it after Close returns ErrProducerClosed, and it must not be called
 // concurrently with Close.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
-	if p.closed.Load() {
+	if !p.acquire() {
 		return ErrProducerClosed
 	}
+	defer p.mu.RUnlock()
 	return p.producer.Produce(p.buildKafkaMessage(topic, msg), nil)
 }
 
@@ -270,9 +324,10 @@ func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 // Calling it after Close returns ErrProducerClosed (Close already flushed), and
 // it must not be called concurrently with Close.
 func (p *Producer) Flush(timeout time.Duration) error {
-	if p.closed.Load() {
+	if !p.acquire() {
 		return ErrProducerClosed // the librdkafka handle is gone; touching it faults
 	}
+	defer p.mu.RUnlock()
 	remaining := p.producer.Flush(int(timeout.Milliseconds()))
 	if remaining > 0 {
 		return fmt.Errorf("%d messages still in queue after flush", remaining)
@@ -292,8 +347,13 @@ var closeFlushTimeout = 10 * time.Second
 // once (later calls do nothing), but it must not be called concurrently with
 // Produce, ProduceBatch or ProduceAsync.
 func (p *Producer) Close() error {
-	// Use atomic CAS to ensure only one Close can succeed
-	if !p.closed.CompareAndSwap(false, true) {
+	// Flip the flag under the write lock: when the lock is released, every
+	// call that got in before has finished with the client and no later call
+	// will touch it. Only one Close gets past the CAS.
+	p.mu.Lock()
+	first := p.closed.CompareAndSwap(false, true)
+	p.mu.Unlock()
+	if !first {
 		return nil
 	}
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -359,5 +360,125 @@ func TestProducer_SpanEndsOnceWhenReportedThenAborted(t *testing.T) {
 	endSpan(km, context.Canceled) // what abort() does for every message
 	if ends != 1 {
 		t.Errorf("span End calls = %d, want 1", ends)
+	}
+}
+
+// drainReports must count a report that is already in the channel as delivered.
+func TestProducer_DrainReportsConsumesBufferedReports(t *testing.T) {
+	topic := "t"
+	ch := make(chan ckafka.Event, 3)
+	ch <- &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic}}
+	ch <- &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic, Error: errors.New("boom")}}
+	errs, left := drainReports(ch, 3)
+	if left != 1 || len(errs) != 1 {
+		t.Fatalf("drainReports() = %d errors, %d left; want 1 error, 1 left", len(errs), left)
+	}
+}
+
+// A Produce still waiting for its delivery report when Close ends must not
+// wait for its context: no report can arrive from a closed client.
+func TestProducer_AwaitingProduceReturnsClosedAfterClose(t *testing.T) {
+	skipIfShort(t)
+	old := closeFlushTimeout
+	closeFlushTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { closeFlushTimeout = old })
+
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Produce(context.Background(), topic, &Message{Value: []byte("stuck")}) }()
+	waitFor(t, 5*time.Second, func() bool { return p.producer.Len() > 0 }, "the message was never queued")
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProducerClosed) {
+			t.Errorf("Produce() = %v, want an error wrapping ErrProducerClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Produce did not return within 5s of Close")
+	}
+}
+
+// Produce, ProduceBatch and ProduceAsync may race Close (also a doubled Close):
+// a call that loses the race reports ErrProducerClosed and nothing touches the
+// client once it is gone.
+func TestProducer_ConcurrentProduceAndClose(t *testing.T) {
+	skipIfShort(t)
+	old := closeFlushTimeout
+	closeFlushTimeout = 2 * time.Second
+	t.Cleanup(func() { closeFlushTimeout = old })
+
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()),
+		ProducerWithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	msg := func() *Message { return &Message{Value: []byte("v")} }
+	async := func() error { return p.ProduceAsync(topic, msg()) }
+	sync1 := func() error { return p.Produce(context.Background(), topic, msg()) }
+	batch := func() error { return p.ProduceBatch(context.Background(), topic, []*Message{msg(), msg()}) }
+	calls := []func() error{async, async, async, sync1, sync1, batch, batch}
+
+	failures := make(chan error, len(calls))
+	finished := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, call := range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				err := call()
+				var ke ckafka.Error
+				if errors.As(err, &ke) && ke.Code() == ckafka.ErrQueueFull {
+					time.Sleep(time.Millisecond) // ProduceAsync has no back-pressure
+					continue
+				}
+				if err != nil {
+					failures <- err
+					return
+				}
+			}
+		}()
+	}
+	go func() { wg.Wait(); close(finished) }()
+
+	time.Sleep(200 * time.Millisecond) // let every goroutine get going
+	closed := make(chan error, 2)
+	for range 2 {
+		go func() { closed <- p.Close() }()
+	}
+	for range 2 {
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("Close() = %v, want nil", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("Close did not return within 15s")
+		}
+	}
+	select {
+	case <-finished:
+	case <-time.After(15 * time.Second):
+		t.Fatal("produce goroutines did not finish within 15s of Close")
+	}
+	close(failures)
+	for err := range failures {
+		if !errors.Is(err, ErrProducerClosed) {
+			t.Errorf("produce call failed with %v, want an error wrapping ErrProducerClosed", err)
+		}
 	}
 }
