@@ -853,6 +853,15 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 		case ckafka.RevokedPartitions:
 			c.logger.Info("partitions revoked", "count", len(e.Partitions))
 
+			// The revoked partitions belong to another member from here on:
+			// their pending messages are unstored and will reach that member.
+			// This comes before the user's callback because the client revokes
+			// the partitions whatever that callback returns.
+			if n := c.dropPendingFor(e.Partitions); n > 0 {
+				c.logger.Debug("dropped pending batch messages of revoked partitions", "count", n)
+			}
+			c.dropBlockedFor(e.Partitions)
+
 			// Call user's callback
 			if c.config.RebalanceCallback != nil {
 				if err := c.config.RebalanceCallback(RebalanceEvent{Type: RebalanceRevoked, Partitions: convertPartitions(e.Partitions)}); err != nil {
@@ -868,13 +877,6 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 					c.logger.Warn("failed to commit offsets during rebalance", "error", err)
 				}
 			}
-
-			// The revoked partitions belong to another member from here on:
-			// their pending messages are unstored and will reach that member.
-			if n := c.dropPendingFor(e.Partitions); n > 0 {
-				c.logger.Debug("dropped pending batch messages of revoked partitions", "count", n)
-			}
-			c.dropBlockedFor(e.Partitions)
 
 			if cooperative {
 				return consumer.IncrementalUnassign(e.Partitions)

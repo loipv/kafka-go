@@ -1337,6 +1337,43 @@ func TestConsumer_RevokeDropsPendingBatchMessages(t *testing.T) {
 	}
 }
 
+// The client revokes the partitions whatever the user's rebalance callback
+// returns, so a callback error must not leave their pending messages or their
+// blocked state behind.
+func TestConsumer_RevokeCleansUpWhenCallbackFails(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 2)
+	errCallback := errors.New("callback failed")
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithLogger(slog.New(slog.DiscardHandler)),
+		ConsumerWithRebalanceCallback(func(RebalanceEvent) error { return errCallback }))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer c.Close(context.Background())
+	c.OnBatch(func(context.Context, []*Message) error { return nil })
+	c.batch = []*Message{{Topic: topic, Partition: 0, Offset: 0}, {Topic: topic, Partition: 1, Offset: 0}}
+	c.blocked[TopicPartition{Topic: topic, Partition: 0}] = blockState{blocks: 1}
+
+	got := c.rebalanceCallback()(c.consumer, ckafka.RevokedPartitions{
+		Partitions: []ckafka.TopicPartition{{Topic: &topic, Partition: 0}},
+	})
+	if !errors.Is(got, errCallback) {
+		t.Errorf("rebalance callback = %v, want the user callback's error", got)
+	}
+
+	c.batchMu.Lock()
+	if len(c.batch) != 1 || c.batch[0].Partition != 1 {
+		t.Errorf("pending batch after the revoke = %+v, want only the partition 1 message", c.batch)
+	}
+	c.batchMu.Unlock()
+	if blocked := c.blockedSnapshot(); len(blocked) != 0 {
+		t.Errorf("blocked partitions after the revoke = %+v, want none", blocked)
+	}
+}
+
 // A Close that races the very beginning of Start must still end with the
 // consumer released by exactly one of them. The test parks both on c.mu and
 // lets them go together: whichever order they take the lock in, once both have

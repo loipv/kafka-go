@@ -391,8 +391,10 @@ func ConsumerWithErrorHandler(handler ErrorHandler) ConsumerOption {
 //   - logging or monitoring rebalance events
 //
 // A non-nil error is logged and returned from the library's rebalance
-// callback, and the library skips its own assign or revoke handling for that
-// event.
+// callback. The client applies the assignment or the revoke all the same, and
+// the messages and blocked state of revoked partitions are still dropped; what
+// the error skips is the library's commit of stored offsets before a revoke
+// (with auto commit off).
 //
 // The revoke that Close triggers runs after the consumer is marked closed, so
 // Consumer.Commit called from the callback then returns ErrConsumerClosed. The
