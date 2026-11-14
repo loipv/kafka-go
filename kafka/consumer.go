@@ -54,7 +54,10 @@ type Consumer struct {
 	// Lifecycle / batch flush
 	done       chan struct{} // closed by Close; stops helper goroutines
 	loopExited chan struct{} // closed when the main consume loop returns
-	flushCh    chan struct{} // cap 1: batch-flush signal consumed in the main loop
+	// teardownByLoop (guarded by mu) is set when Close gave up waiting for the
+	// loop: the loop then runs teardown itself on its way out.
+	teardownByLoop bool
+	flushCh        chan struct{} // cap 1: batch-flush signal consumed in the main loop
 
 	// Batch processing
 	batchMu sync.Mutex
@@ -257,7 +260,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	c.loopExited = make(chan struct{})
 	c.mu.Unlock()
 	defer c.running.Store(false) // every exit path releases
-	defer close(c.loopExited)    // signals Close that the loop is gone
+	defer c.loopDone()           // signals Close that the loop is gone
 
 	// Subscribe to topics; the rebalance callback is always installed so the
 	// library's own commit/assign logic runs even without a user callback
@@ -349,20 +352,55 @@ func (c *Consumer) Close(ctx context.Context) error {
 		c.mu.RUnlock()
 		select {
 		case <-loopExited:
-		case <-time.After(5 * time.Second):
-			c.logger.Warn("consumer loop did not exit within 5s; closing anyway")
+		case <-time.After(closeLoopWait):
+			// The loop is still using the client (a handler or a DLQ wait is
+			// running). Destroying the client under it faults, so the loop
+			// tears down instead. Decide under mu: the loop may be leaving
+			// at this very moment, and exactly one side must do it.
+			c.mu.Lock()
+			select {
+			case <-loopExited:
+				c.mu.Unlock()
+			default:
+				c.teardownByLoop = true
+				c.mu.Unlock()
+				c.logger.Warn("consumer loop did not exit in time; it releases the consumer when Start returns",
+					"waited", closeLoopWait)
+				return ErrCloseTimeout
+			}
 		}
 	}
 
-	return c.teardown(ctx)
+	return c.teardown(ctx, true)
 }
 
-// teardown flushes the batch still in memory (batch modes), then releases the
-// DLQ producer, the idempotency store and the client. It must only run once
-// the consume loop no longer uses the client.
-func (c *Consumer) teardown(ctx context.Context) error {
+// closeLoopWait is how long Close waits for the consume loop to leave. A
+// variable so tests can shorten it.
+var closeLoopWait = 5 * time.Second
+
+// loopDone is the consume loop's exit: it tells Close the loop is gone and,
+// when Close already gave up waiting, releases the consumer in its place. The
+// last partial batch is not flushed in that case: its messages are unstored
+// and are redelivered.
+func (c *Consumer) loopDone() {
+	c.mu.Lock()
+	close(c.loopExited)
+	handed := c.teardownByLoop
+	c.mu.Unlock()
+	if !handed {
+		return
+	}
+	if err := c.teardown(context.Background(), false); err != nil {
+		c.logger.Warn("closing the consumer after a timed-out Close failed", "error", err)
+	}
+}
+
+// teardown flushes the batch still in memory (when flush is set, in batch
+// modes), then releases the DLQ producer, the idempotency store and the
+// client. It must only run once the consume loop no longer uses the client.
+func (c *Consumer) teardown(ctx context.Context, flush bool) error {
 	// Process remaining batch
-	if c.batchMode() {
+	if flush && c.batchMode() {
 		c.processBatch(ctx)
 	}
 

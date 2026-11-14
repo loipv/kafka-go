@@ -1206,3 +1206,83 @@ func TestConsumer_CloseFlushWithEndedContextLeavesBatchUnstored(t *testing.T) {
 	}
 	assertRedelivered(t, mc, topic, group, 2)
 }
+
+// When the consume loop outlives Close's wait (a handler still running, the
+// Start context never cancelled), Close must not destroy the client under it:
+// it reports ErrCloseTimeout and the loop releases everything when Start
+// returns.
+func TestConsumer_CloseTimeoutHandsTeardownToLoop(t *testing.T) {
+	skipIfShort(t)
+	old := closeLoopWait
+	closeLoopWait = 200 * time.Millisecond
+	t.Cleanup(func() { closeLoopWait = old })
+
+	mc := newMockCluster(t)
+	topic, group := uniqueTopic(t, mc, 1), uniqueGroupName(t)
+	c, err := NewConsumer(fastAtLeastOnce(
+		ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(group), ConsumerWithTopics(topic),
+		ConsumerWithLogger(slog.New(slog.DiscardHandler)),
+	)...)
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	c.OnMessage(func(context.Context, *Message) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	})
+	exited := make(chan error, 1)
+	go func() { exited <- c.Start(context.Background()) }()
+
+	p, err := NewProducer(ProducerWithBrokers(mc.BootstrapServers()))
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer p.Close()
+	if err := p.Produce(context.Background(), topic, &Message{Value: []byte("v")}); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(15 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	if err := c.Close(context.Background()); !errors.Is(err, ErrCloseTimeout) {
+		t.Fatalf("Close() = %v, want ErrCloseTimeout", err)
+	}
+	if c.handleClosed.Load() {
+		t.Fatal("the client was closed while the consume loop was still running")
+	}
+	if err := c.Start(context.Background()); !errors.Is(err, ErrConsumerClosed) {
+		t.Errorf("Start() after a timed-out Close = %v, want ErrConsumerClosed", err)
+	}
+	if err := c.Close(context.Background()); err != nil {
+		t.Errorf("second Close() = %v, want nil", err)
+	}
+
+	close(release)
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Errorf("Start() = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after the handler was released")
+	}
+	if !c.handleClosed.Load() {
+		t.Error("the consume loop did not release the client when Start returned")
+	}
+	if err := c.Commit(); !errors.Is(err, ErrConsumerClosed) {
+		t.Errorf("Commit() = %v, want ErrConsumerClosed", err)
+	}
+	// The offset was stored on a live client and committed by the loop's teardown.
+	waitFor(t, 10*time.Second, func() bool {
+		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) == 1
+	}, "the message's offset was never committed")
+}
