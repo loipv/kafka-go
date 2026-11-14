@@ -375,6 +375,23 @@ func TestProducer_DrainReportsConsumesBufferedReports(t *testing.T) {
 	}
 }
 
+// A report that reached the channel before Close finished is a real outcome:
+// whichever arm of the wait fires, it is counted and never turned into
+// ErrProducerClosed.
+func TestProducer_AwaitReportCountsBufferedReportAfterClose(t *testing.T) {
+	topic := "t"
+	p := &Producer{done: make(chan struct{})}
+	close(p.done)
+	for range 200 { // both arms are ready and the select picks one at random
+		ch := make(chan ckafka.Event, 1)
+		ch <- &ckafka.Message{TopicPartition: ckafka.TopicPartition{Topic: &topic}}
+		errs, left, cause := p.awaitReport(context.Background(), ch, 1)
+		if cause != nil || left != 0 || len(errs) != 0 {
+			t.Fatalf("awaitReport() = %v errors, %d left, cause %v; want a confirmed delivery", errs, left, cause)
+		}
+	}
+}
+
 // A Produce still waiting for its delivery report when Close ends must not
 // wait for its context: no report can arrive from a closed client.
 func TestProducer_AwaitingProduceReturnsClosedAfterClose(t *testing.T) {
