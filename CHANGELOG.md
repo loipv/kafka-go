@@ -66,6 +66,9 @@ related). Delivery stays at-least-once.
 
 ### Changed
 
+- The DLQ header `x-dlq-handler-retry-count` is now `x-dlq-handler-attempts`.
+  Its value was always the number of handler calls (the first one included, 1
+  for a batch handler), not the number of retries; only the name changed.
 - `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` may now be called
   concurrently with `Producer.Close` (it was forbidden: a call could reach the
   client while `Close` destroyed it). A call that loses the race returns
@@ -225,6 +228,7 @@ Every "new" form below compiles against the final v1.2.0 API.
 
 | 1.1 | 1.2 |
 |---|---|
+| DLQ consumers reading the `x-dlq-handler-retry-count` header | read `x-dlq-handler-attempts` (same value) |
 | `ConsumerWithBatchProcessing(true)` + `OnBatch(h)` | `OnBatch(h)`; keep `ConsumerWithBatchSize` / `ConsumerWithBatchTimeout` |
 | `ConsumerWithBatchProcessing(true)` + `OnMessage(h)` (messages handled one by one inside batches) | delete the option; `OnMessage(h)` is plain single-message handling, the batch size and timeout no longer apply |
 | `ConsumerWithBatchProcessing(true)` + `ConsumerWithGroupByKey(true)` + grouped handler | `OnGroupedBatch(h)` |

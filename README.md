@@ -430,7 +430,7 @@ With the defaults the 300-second floor applies. The estimate counts the waits on
 How a message reaches the DLQ:
 
 - The record keeps the original key, value and headers. The partition is chosen by librdkafka from the key.
-- It gets these headers: `x-dlq-original-topic`, `x-dlq-timestamp` (RFC 3339), `x-dlq-handler-retry-count` (the number of times the handler was called: 1 for a batch handler) and, with `IncludeErrorInfo`, `x-dlq-error-message`.
+- It gets these headers: `x-dlq-original-topic`, `x-dlq-timestamp` (RFC 3339), `x-dlq-handler-attempts` (the number of times the handler was called: 1 for a batch handler) and, with `IncludeErrorInfo`, `x-dlq-error-message`.
 - The DLQ produce is a single attempt with `acks=all`, confirmed by its delivery report and bounded by the DLQ producer's `message.timeout.ms`: 30 seconds unless the DLQ connection's raw config sets `message.timeout.ms` (`delivery.timeout.ms` is accepted as an alias). That is `ConsumerWithRawConfig` by default, and `DLQConfig.Raw` only when `DLQConfig.Brokers` points at a separate cluster.
 - When the produce fails or times out, the message is not parked: its partition blocks and the message is retried later. A broken DLQ therefore blocks the partitions of the messages it could not take, and nothing is dropped. Each attempt holds up the poll loop for up to the delivery timeout. The one exception is `SkipOnMaxRetries`.
 - When a batch fails, the messages the error handler did not claim are sent in one pass. If any of them fails, the whole batch blocks.
