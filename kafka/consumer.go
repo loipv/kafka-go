@@ -169,7 +169,7 @@ func NewConsumer(opts ...ConsumerOption) (*Consumer, error) {
 
 	// Initialize DLQ service if configured
 	if config.DLQ != nil {
-		c.dlqService, err = newDLQService(config.dlqConn(), config.DLQ, c.metrics)
+		c.dlqService, err = newDLQService(config.dlqConn(), config.DLQ, c.metrics, c.logger)
 		if err != nil {
 			_ = consumer.Close()
 			return nil, fmt.Errorf("failed to create DLQ service: %w", err)

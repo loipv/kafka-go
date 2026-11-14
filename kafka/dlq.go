@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"strconv"
 	"sync/atomic"
@@ -37,6 +38,7 @@ type dlqService struct {
 	producer *ckafka.Producer
 	config   *DLQConfig
 	metrics  *metricsCollector
+	logger   *slog.Logger
 	closed   atomic.Bool   // true once closed
 	done     chan struct{} // closed at the start of Close: releases waiting produces
 }
@@ -63,7 +65,7 @@ func dlqProducerConfig(cc connConfig) ckafka.ConfigMap {
 
 // newDLQService creates a new DLQ service. It builds its producer from the
 // same connConfig as the parent consumer, so SSL/SASL is never dropped.
-func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) (*dlqService, error) {
+func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector, logger *slog.Logger) (*dlqService, error) {
 	cm := dlqProducerConfig(cc)
 
 	producer, err := ckafka.NewProducer(&cm)
@@ -75,6 +77,7 @@ func newDLQService(cc connConfig, config *DLQConfig, metrics *metricsCollector) 
 		producer: producer,
 		config:   config,
 		metrics:  metrics,
+		logger:   logger,
 		done:     make(chan struct{}),
 	}, nil
 }
@@ -186,7 +189,29 @@ func (s *dlqService) Close() error {
 	}
 	close(s.done)
 
-	s.producer.Flush(int(dlqCloseFlushTimeout.Milliseconds()))
+	// Nothing reads this producer's Events channel (delivery reports go to a
+	// private channel), and Flush counts unread events as outstanding: a
+	// single error event from an earlier broker hiccup would make Flush wait
+	// its whole timeout and report a remainder with nothing to deliver. Drain
+	// the events while flushing so the remainder is messages only.
+	stop, drained := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-s.producer.Events():
+			case <-stop:
+				return
+			}
+		}
+	}()
+	remaining := s.producer.Flush(int(dlqCloseFlushTimeout.Milliseconds()))
+	close(stop)
+	<-drained
+	if remaining > 0 {
+		// Messages still queued here are lost with the producer; say how many.
+		s.logger.Warn("dlq producer closed with undelivered messages", "remaining", remaining)
+	}
 	s.producer.Close()
 	return nil
 }

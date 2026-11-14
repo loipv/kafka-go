@@ -1,8 +1,10 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -470,7 +472,7 @@ func TestDLQ_ProduceAllContextEndsBeforeDeliveryReports(t *testing.T) {
 	mc := newMockCluster(t)
 	dlqTopic := uniqueTopic(t, mc, 1)
 	metrics := newMetricsCollector()
-	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, metrics)
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, metrics, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("newDLQService: %v", err)
 	}
@@ -508,7 +510,7 @@ func TestDLQ_ProduceAllReturnsWhenServiceCloses(t *testing.T) {
 	shortDLQCloseFlush(t)
 	mc := newMockCluster(t)
 	dlqTopic := uniqueTopic(t, mc, 1)
-	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, newMetricsCollector())
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic}, newMetricsCollector(), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("newDLQService: %v", err)
 	}
@@ -531,5 +533,79 @@ func TestDLQ_ProduceAllReturnsWhenServiceCloses(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("produceAll did not return after the DLQ service closed")
+	}
+}
+
+// A DLQ producer that closes with messages still queued loses them; Close must
+// say how many, without logging anything from the messages.
+func TestDLQ_CloseWarnsAboutUnflushedMessages(t *testing.T) {
+	skipIfShort(t)
+	shortDLQCloseFlush(t)
+	mc := newMockCluster(t)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	var buf bytes.Buffer
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic},
+		newMetricsCollector(), slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("newDLQService: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	queued := &ckafka.Message{
+		TopicPartition: ckafka.TopicPartition{Topic: &dlqTopic, Partition: ckafka.PartitionAny},
+		Value:          []byte("secret-payload"),
+	}
+	if err := s.producer.Produce(queued, nil); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "remaining=1") {
+		t.Errorf("log = %q, want a Warn with remaining=1", got)
+	}
+	if strings.Contains(got, "secret-payload") {
+		t.Errorf("log leaks the message value: %q", got)
+	}
+}
+
+// An unread error event left by an earlier broker hiccup is not an undelivered
+// message: Close must neither wait out its flush timeout nor warn about it.
+func TestDLQ_CloseIgnoresStaleEvents(t *testing.T) {
+	skipIfShort(t)
+	old := dlqCloseFlushTimeout
+	dlqCloseFlushTimeout = 5 * time.Second
+	t.Cleanup(func() { dlqCloseFlushTimeout = old })
+
+	mc := newMockCluster(t)
+	dlqTopic := uniqueTopic(t, mc, 1)
+	var buf bytes.Buffer
+	s, err := newDLQService(connConfig{Brokers: []string{mc.BootstrapServers()}}, &DLQConfig{Topic: dlqTopic},
+		newMetricsCollector(), slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("newDLQService: %v", err)
+	}
+	if _, err := s.producer.GetMetadata(&dlqTopic, false, 5000); err != nil { // connect first
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if err := mc.SetBrokerDown(1); err != nil {
+		t.Fatalf("SetBrokerDown: %v", err)
+	}
+	waitFor(t, 15*time.Second, func() bool { return len(s.producer.Events()) > 0 }, "the broker outage produced no error event")
+	if err := mc.SetBrokerUp(1); err != nil {
+		t.Fatalf("SetBrokerUp: %v", err)
+	}
+
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("Close took %v with nothing to deliver, want well under the 5s flush timeout", d)
+	}
+	if got := buf.String(); strings.Contains(got, "level=WARN") {
+		t.Errorf("Close warned with nothing to deliver: %q", got)
 	}
 }
