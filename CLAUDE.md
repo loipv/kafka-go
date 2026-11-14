@@ -34,7 +34,7 @@ go run examples/producer/main.go     # also: consumer, grouped_consumer, health,
 
 ## Requirements
 
-- Go 1.24+ (see `go.mod`)
+- Go 1.26.11+ (see `go.mod`)
 - librdkafka (statically vendored by confluent-kafka-go for common platforms; builds need `CGO_ENABLED=1`, the Makefile sets it)
 
 ## Architecture

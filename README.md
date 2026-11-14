@@ -45,7 +45,7 @@ go get github.com/loipv/kafka-go
 
 Requirements:
 
-- Go 1.24.10 or newer (the `go` directive in `go.mod`).
+- Go 1.26.11 or newer (the `go` directive in `go.mod`).
 - cgo: build with `CGO_ENABLED=1` and a C toolchain. confluent-kafka-go bundles a statically linked librdkafka for common platforms, so a separate librdkafka install is normally not needed.
 
 ## Project structure
@@ -809,4 +809,4 @@ Make targets (they mirror CI):
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).

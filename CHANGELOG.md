@@ -194,6 +194,7 @@ related). Delivery stays at-least-once.
 - Doc comments on every exported identifier, compiled `Example` functions for
   the producer, async producer, consumer, batch and grouped-batch consumers,
   `Commit` and the health checker, and a README rewritten to match.
+- A `LICENSE` file (MIT).
 
 ### Migrating from 1.1
 
@@ -288,7 +289,8 @@ ports all of them in one pass.
   return value lets the handler claim ownership of the message.
 - `HealthResult.Error` is `string` (`json:"error,omitzero"`).
 - `Default*` values are `const`.
-- Minimum Go 1.24.10.
+- Minimum Go 1.26.11 (was 1.24.10): it is the lowest release in which every
+  standard-library vulnerability `govulncheck` reported for this module is fixed.
 
 ### Changed behavior (same signature)
 
