@@ -64,10 +64,12 @@ const retryBudgetLimit = maxPollIntervalLimitMs * time.Millisecond
 
 // retryBudget returns the worst-case wall time of one executeWithRetry cycle
 // (all sleeps, no handler time). Feeds the max.poll.interval.ms floor. It
-// never overflows: once the total passes retryBudgetLimit it stops and returns
-// what it has (math.MaxInt64 when one more wait would not fit), so an absurd
-// RetryConfig is reported as over the limit instead of wrapping around, and
-// the loop does not run MaxRetries times.
+// never overflows and never loops MaxRetries times: it stops as soon as the
+// total passes retryBudgetLimit (returning what it has, or math.MaxInt64 when
+// the next wait would not fit), and once the wait stops changing (it reached
+// MaxInterval, or decayed to zero) it adds the remaining waits in one step.
+// An absurd RetryConfig is therefore reported as over the limit instead of
+// wrapping around or stalling NewConsumer.
 func retryBudget(r RetryConfig) time.Duration {
 	maxRetries, initial, multiplier, maxInterval := r.MaxRetries, r.InitialInterval, r.Multiplier, r.MaxInterval
 	var total time.Duration
@@ -82,11 +84,19 @@ func retryBudget(r RetryConfig) time.Duration {
 		}
 		// Compare as floats: converting an out-of-range product to a
 		// Duration first would wrap.
-		if next := float64(delay) * multiplier; next > float64(maxInterval) {
-			delay = maxInterval
-		} else {
-			delay = time.Duration(next)
+		next := maxInterval
+		if f := float64(delay) * multiplier; f <= float64(maxInterval) {
+			next = time.Duration(f)
 		}
+		if next == delay {
+			// Every remaining wait equals this one.
+			left := time.Duration(maxRetries - i - 1)
+			if delay > 0 && left > (math.MaxInt64-total)/delay {
+				return math.MaxInt64
+			}
+			return total + left*delay
+		}
+		delay = next
 	}
 	return total
 }

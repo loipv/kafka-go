@@ -242,16 +242,23 @@ func TestRetry_ErrorAfterContextEndIsNotCountedAsFailure(t *testing.T) {
 	}
 }
 
-// An absurd RetryConfig must yield a budget above the 24h limit, quickly, so
-// the configuration is rejected: never a wrapped-around (negative or small)
-// duration, and never a loop that runs MaxRetries times.
+// An absurd RetryConfig must be costed quickly and without wrapping around: a
+// budget above the 24h limit gets the configuration rejected, and the loop
+// never runs MaxRetries times.
 func TestRetry_BudgetSaturatesInsteadOfOverflowing(t *testing.T) {
 	tests := []struct {
-		name string
-		r    RetryConfig
+		name     string
+		r        RetryConfig
+		min, max time.Duration
 	}{
-		{"huge retry count", RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Hour, Multiplier: 2, MaxInterval: time.Hour}},
-		{"huge interval", RetryConfig{MaxRetries: 2, InitialInterval: math.MaxInt64, Multiplier: 2, MaxInterval: math.MaxInt64}},
+		{"huge retry count", RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Hour, Multiplier: 2, MaxInterval: time.Hour},
+			24 * time.Hour, math.MaxInt64},
+		{"huge interval", RetryConfig{MaxRetries: 2, InitialInterval: math.MaxInt64, Multiplier: 2, MaxInterval: math.MaxInt64},
+			24 * time.Hour, math.MaxInt64},
+		{"huge retry count with a tiny cap", RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Microsecond, Multiplier: 2, MaxInterval: time.Microsecond},
+			24 * time.Hour, math.MaxInt64}, // 2^40 microseconds is about 12.7 days
+		{"huge retry count with a decaying wait", RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Second, Multiplier: 0.5, MaxInterval: time.Second},
+			time.Second, 3 * time.Second}, // 1s + 0.5s + 0.25s + ... stays under 2s
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -259,8 +266,8 @@ func TestRetry_BudgetSaturatesInsteadOfOverflowing(t *testing.T) {
 			go func() { got <- retryBudget(tt.r) }()
 			select {
 			case d := <-got:
-				if d <= 24*time.Hour {
-					t.Errorf("retryBudget() = %v, want more than 24h", d)
+				if d <= tt.min || d > tt.max {
+					t.Errorf("retryBudget() = %v, want in (%v, %v]", d, tt.min, tt.max)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("retryBudget did not return within 2s")
