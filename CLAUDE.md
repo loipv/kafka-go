@@ -80,7 +80,7 @@ The consumer's mode follows the registered handler (one active handler; there ar
 - `batchFlushLoop` (batch mode only) is a ticker that does a non-blocking send on `flushCh`; the poll loop does the flush. Rebalance callbacks run on whichever goroutine is polling the client. The `ProducerWithDeliveryErrorHandler` handler runs on the producer's delivery-report goroutine (`handleDeliveryReports`), so it must not block for long.
 - `Pause`, `Resume`, `Metrics` and `Commit` are safe from any goroutine; `On*` registration is not synchronised and must precede `Start`.
 - `Producer` runs one delivery-report goroutine (`handleDeliveryReports`), waited on in `Close`. `Producer.mu` guards the client's lifetime: every use of the client outside `Close` goes through `acquire()` (read lock plus the `closed` check) and `Close` flips `closed` under the write lock, so produce methods may race `Close`. The lock is never held while waiting for a delivery report. The idempotency store runs one cleanup goroutine, stopped by its `close`.
-- State flags are `atomic.Bool` (`running` is a CAS with a deferred reset); `mu` guards `loopExited`, `batchMu` the batch, `blockMu` the blocked map.
+- State flags are `atomic.Bool` (`running` is a CAS with a deferred reset); `mu` guards `loopExited` and `teardownByLoop` and makes two steps atomic (`Start` claiming a run and publishing its `loopExited`; `Close` flipping `closed` and sampling the run), `batchMu` the batch, `blockMu` the blocked map.
 
 ## Key Patterns
 
