@@ -1,12 +1,12 @@
 # Changelog
 
-## v1.2.0 (2026-11-13)
+## v1.2.0 (2026-11-14)
 
 > **v1.2.0 contains breaking API changes despite the minor version number.**
 > The library has no known users yet, so the module path stays
 > `github.com/loipv/kafka-go` and there is no `/v2`. If you are upgrading from
-> v1.0.0, apply the [v1.1.0 migration](#migration) first (v1.1.0 was never
-> tagged), then [Migrating from 1.1](#migrating-from-11). One correction to the
+> v1.1.x, follow [Migrating from 1.1](#migrating-from-11); from v1.0.0, apply
+> the [v1.1.0 migration](#migration) first. One correction to the
 > 1.1.0 notes below: `ConsumerWithAutoCommit(false)` does not disable the offset
 > store. The library still stores the offsets of parked messages and commits them
 > when partitions are revoked; only the periodic automatic commit is off, so the
@@ -274,7 +274,17 @@ Every "new" form below compiles against the final v1.2.0 API.
 | `DefaultBatchSize`, `Default*`, `Messaging*Key` constants, `NewIdempotencyStore`, `NewTracingService`, `NewDLQMetricsCollector` | removed; use the option defaults documented on each `ConsumerWith*` / `ProducerWith*` and the attribute names `"messaging.kafka.offset"`, `"messaging.kafka.consumer.group"`, ... as strings |
 | `Start` blocking forever after a fatal client error | `Start` returns the error; call `Close` afterwards |
 
-## v1.1.0 (unreleased)
+## v1.1.1 (2026-10-02)
+
+### Added
+
+- `DLQConfig.Brokers` / `SSL` / `SASL` / `Raw` — send the DLQ to a separate
+  cluster. Empty `Brokers` keeps the DLQ on the consumer's connection; when set,
+  the DLQ producer and DLQ retry consumer use only these fields and inherit
+  nothing from the consumer, so the consumer's credentials never reach the other
+  cluster.
+
+## v1.1.0 (2026-09-14)
 
 v1.1.0 fixes all 33 confirmed defects from a full code review, deletes dead
 features, renames the API to Kafka/Go convention, and makes delivery
@@ -384,10 +394,6 @@ The ones that will surprise people:
   librdkafka config keys, merged last.
 - Sentinel errors in `kafka/errors.go` (`ErrProducerClosed`,
   `ErrBrokersRequired`, `ErrNoHandler`, …) for programmatic assertions.
-- `DLQConfig.Brokers` / `SSL` / `SASL` / `Raw` — send the DLQ to a separate
-  cluster. Empty `Brokers` keeps today's behavior (DLQ shares the consumer's
-  connection); when set, the DLQ producer and DLQ retry consumer use only these
-  fields and inherit nothing from the consumer.
 - Health checks compute real consumer lag via watermark offsets.
 - Test suite: unit + mock-broker tests (`kafka.NewMockCluster`, no Docker) on
   every run, plus a build-tagged Redpanda integration suite; CI workflow
