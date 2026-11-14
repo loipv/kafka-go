@@ -114,11 +114,12 @@ Three tiers: unit (pure logic), mock broker (`ckafka.NewMockCluster`, no Docker,
 
 ## Releasing
 
-The `release` job of `.github/workflows/ci.yml` runs [release-please](https://github.com/googleapis/release-please) after the other jobs pass on `main`. It keeps one release PR open; merging that PR creates the tag `vX.Y.Z` and the GitHub Release.
+The `release` job of `.github/workflows/ci.yml` runs [release-please](https://github.com/googleapis/release-please) on pushes to `main`, after the `test`, `lint`, `integration` and `vuln` jobs pass for the pushed commit. It keeps one release PR open; merging that PR creates the tag `vX.Y.Z` and the GitHub Release.
 
-- The release PR updates `CHANGELOG.md`, `Version` in `kafka/doc.go` and `.release-please-manifest.json` together. `TestVersion_MatchesManifestAndChangelog` fails when they disagree, which keeps the release job from tagging such a commit.
+- The release PR updates `CHANGELOG.md`, `Version` in `kafka/doc.go` and `.release-please-manifest.json` together. `TestVersion_MatchesManifestAndChangelog` fails when they disagree.
+- CI does not start by itself on the release PR (it is opened with the default token). Before merging it, run the `ci` workflow by hand on its branch (Actions > ci > Run workflow, branch `release-please--branches--main`), and merge only when that run and the latest run on `main` are green.
+- The job tags a merged release PR at that PR's own commit, on the next green run on `main`, even when that commit's own run failed: a later fix does not move the tag. If a merged release commit is red, do not fix forward first. Change the merged PR's label from `autorelease: pending` to `autorelease: tagged`, land the fix, then tag `vX.Y.Z` by hand on the green commit.
 - `CHANGELOG.md` is generated from commit subjects: do not edit it by hand, except to add migration notes to the release PR just before merging it.
-- CI does not run on the release PR itself (it is opened with the default token); it runs when the PR is merged.
 - Dependabot (`.github/dependabot.yml`) opens one grouped PR a week per ecosystem. Merge them with squash or rebase so the `deps:` / `ci:` subject reaches `main`. It does not manage the `go` line of `go.mod`, the golangci-lint version in `ci.yml` or the govulncheck version in the `Makefile`; raise those by hand.
 
 ## Conventions
