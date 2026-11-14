@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// The version lives in three places that a release updates together. If they
-// disagree after a release PR is merged, this fails CI on main and the release
-// job, which needs the test job, does not create the tag.
+// The version lives in three places that a release updates together. A release
+// PR whose files disagree fails this when CI is run on its branch, before the
+// merge. After the merge it is too late to rely on it: the next green run on
+// main tags the merged release commit whether its own run passed or not.
 func TestVersion_MatchesManifestAndChangelog(t *testing.T) {
 	raw, err := os.ReadFile("../.release-please-manifest.json")
 	if err != nil {

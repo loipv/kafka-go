@@ -3,6 +3,7 @@ on:
   push: {branches: [main]}
   pull_request:
   schedule: [{cron: "23 3 * * *"}]
+  workflow_dispatch: # run by hand on the release PR's branch, where CI does not start by itself
 permissions: {contents: read}
 env:
   CGO_ENABLED: "1"
@@ -48,11 +49,12 @@ jobs:
         with: {go-version-file: go.mod, cache: true}
       - run: make vuln
   release:
-    # Runs last and only for pushes to main: the release PR is refreshed and a
-    # merged one is tagged only when the commit passed every other job.
+    # Runs last and only for pushes to main, once the pushed commit passed the
+    # jobs below. It tags a merged release PR at that PR's own commit, so this
+    # delays the tag of a red release commit but does not prevent it.
     if: github.event_name == 'push'
     needs: [test, lint, integration, vuln]
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: write}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
