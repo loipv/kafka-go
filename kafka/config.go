@@ -196,7 +196,8 @@ func buildConsumerConfig(c *ConsumerConfig) (ckafka.ConfigMap, error) {
 		}
 	}
 	budget, dlq := retryBudget(normalizeRetry(c.Retry)), c.dlqTimeout() // budget > 0: normalizeRetry sets every field
-	need := float64((budget + dlq).Milliseconds()) * 1.5
+	// Added as floats: budget can be as large as math.MaxInt64.
+	need := (float64(budget.Milliseconds()) + float64(dlq.Milliseconds())) * 1.5
 	if need > maxPollIntervalLimitMs {
 		cause, fix := fmt.Sprintf("the RetryConfig retry budget (%v)", budget), "the RetryConfig waits"
 		if dlq > 0 {

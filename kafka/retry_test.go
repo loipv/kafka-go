@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,5 +239,32 @@ func TestRetry_ErrorAfterContextEndIsNotCountedAsFailure(t *testing.T) {
 	}
 	if n := c.Metrics().HandlerFailures; n != 0 {
 		t.Errorf("HandlerFailures = %d, want 0: shutdown is not a handler failure", n)
+	}
+}
+
+// An absurd RetryConfig must yield a budget above the 24h limit, quickly, so
+// the configuration is rejected: never a wrapped-around (negative or small)
+// duration, and never a loop that runs MaxRetries times.
+func TestRetry_BudgetSaturatesInsteadOfOverflowing(t *testing.T) {
+	tests := []struct {
+		name string
+		r    RetryConfig
+	}{
+		{"huge retry count", RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Hour, Multiplier: 2, MaxInterval: time.Hour}},
+		{"huge interval", RetryConfig{MaxRetries: 2, InitialInterval: math.MaxInt64, Multiplier: 2, MaxInterval: math.MaxInt64}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make(chan time.Duration, 1)
+			go func() { got <- retryBudget(tt.r) }()
+			select {
+			case d := <-got:
+				if d <= 24*time.Hour {
+					t.Errorf("retryBudget() = %v, want more than 24h", d)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("retryBudget did not return within 2s")
+			}
+		})
 	}
 }

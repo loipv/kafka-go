@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -56,18 +57,35 @@ func (c *Consumer) executeWithRetry(ctx context.Context, msg *Message) (int, err
 	return maxRetries + 1, lastErr
 }
 
+// retryBudgetLimit is where retryBudget stops adding: a budget beyond
+// librdkafka's 24h max.poll.interval.ms limit is rejected whatever its exact
+// value.
+const retryBudgetLimit = maxPollIntervalLimitMs * time.Millisecond
+
 // retryBudget returns the worst-case wall time of one executeWithRetry cycle
-// (all sleeps, no handler time). Feeds the max.poll.interval.ms floor.
+// (all sleeps, no handler time). Feeds the max.poll.interval.ms floor. It
+// never overflows: once the total passes retryBudgetLimit it stops and returns
+// what it has (math.MaxInt64 when one more wait would not fit), so an absurd
+// RetryConfig is reported as over the limit instead of wrapping around, and
+// the loop does not run MaxRetries times.
 func retryBudget(r RetryConfig) time.Duration {
 	maxRetries, initial, multiplier, maxInterval := r.MaxRetries, r.InitialInterval, r.Multiplier, r.MaxInterval
 	var total time.Duration
 	delay := initial
 	for i := 0; i < maxRetries; i++ {
+		if delay > math.MaxInt64-total {
+			return math.MaxInt64
+		}
 		total += delay
-		if d := time.Duration(float64(delay) * multiplier); d > maxInterval {
+		if total > retryBudgetLimit {
+			return total
+		}
+		// Compare as floats: converting an out-of-range product to a
+		// Duration first would wrap.
+		if next := float64(delay) * multiplier; next > float64(maxInterval) {
 			delay = maxInterval
 		} else {
-			delay = d
+			delay = time.Duration(next)
 		}
 	}
 	return total

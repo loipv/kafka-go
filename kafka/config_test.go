@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -244,6 +245,13 @@ func TestConfig_BuildConsumerConfig(t *testing.T) {
 			c.Retry = hugeRetry
 			c.DLQ = &DLQConfig{Topic: "d"}
 		}, []string{"RetryConfig", "DLQ", "86400000"}, nil},
+		{"a retry count that would overflow the budget is rejected", func(c *ConsumerConfig) {
+			c.Retry = &RetryConfig{MaxRetries: 1 << 40, InitialInterval: time.Hour, Multiplier: 2, MaxInterval: time.Hour}
+		}, []string{"RetryConfig", "86400000"}, nil},
+		{"a retry interval that would overflow the budget is rejected", func(c *ConsumerConfig) {
+			c.Retry = &RetryConfig{MaxRetries: 2, InitialInterval: math.MaxInt64, Multiplier: 2, MaxInterval: math.MaxInt64}
+			c.DLQ = &DLQConfig{Topic: "d"}
+		}, []string{"RetryConfig", "86400000"}, nil},
 		{"explicit rebalance timeout beyond the limit is rejected", func(c *ConsumerConfig) { c.RebalanceTimeout = 25 * time.Hour },
 			[]string{"ConsumerWithRebalanceTimeout", "86400000"}, nil},
 	} {
