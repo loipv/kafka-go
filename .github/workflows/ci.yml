@@ -11,8 +11,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: {go-version-file: go.mod, cache: true}
       - run: go build ./...
       - run: go vet ./...
@@ -20,32 +20,32 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: {go-version-file: go.mod, cache: true}
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with: {version: v2.13.2}
   integration:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'integration') || github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: {go-version-file: go.mod, cache: true}
       - run: go test -tags=integration -timeout=15m ./kafka/...
   darwin:
     if: github.ref == 'refs/heads/main'
     runs-on: macos-latest # a pinned image is cancelled without a log once GitHub retires it
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: {go-version-file: go.mod, cache: true}
       - run: go test -short ./...
   vuln:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: {go-version-file: go.mod, cache: true}
       - run: make vuln
   release:
