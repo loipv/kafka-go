@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # One weekly pull request per ecosystem. "deps" is a type release-please
+  # releases, so module upgrades reach the changelog; "ci" is not.
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: weekly}
+    commit-message: {prefix: deps}
+    groups:
+      go-modules: {patterns: ["*"]}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    commit-message: {prefix: ci}
+    groups:
+      actions: {patterns: ["*"]}
