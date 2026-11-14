@@ -112,6 +112,15 @@ func WithJSONDecoder[T any](handler func(context.Context, T, *kafka.Message) err
 
 Three tiers: unit (pure logic), mock broker (`ckafka.NewMockCluster`, no Docker, skipped under `-short`) and integration (`//go:build integration`, testcontainers + Redpanda, needs Docker). Both `go vet` and lint run with the `integration` tag. Shared helpers are in `testhelpers_test.go` (`skipIfShort`, `newMockCluster`, `uniqueTopic`, `waitFor`, `fastAtLeastOnce`, ...). Runnable documentation lives in `example_test.go`.
 
+## Releasing
+
+The `release` job of `.github/workflows/ci.yml` runs [release-please](https://github.com/googleapis/release-please) after the other jobs pass on `main`. It keeps one release PR open; merging that PR creates the tag `vX.Y.Z` and the GitHub Release.
+
+- The release PR updates `CHANGELOG.md`, `Version` in `kafka/doc.go` and `.release-please-manifest.json` together. `TestVersion_MatchesManifestAndChangelog` fails when they disagree, which keeps the release job from tagging such a commit.
+- `CHANGELOG.md` is generated from commit subjects: do not edit it by hand, except to add migration notes to the release PR just before merging it.
+- CI does not run on the release PR itself (it is opened with the default token); it runs when the PR is merged.
+- Dependabot (`.github/dependabot.yml`) opens one grouped PR a week per ecosystem. Merge them with squash or rebase so the `deps:` / `ci:` subject reaches `main`. It does not manage the `go` line of `go.mod`, the golangci-lint version in `ci.yml` or the govulncheck version in the `Makefile`; raise those by hand.
+
 ## Conventions
 
 - One concern per source file. Tests for `x.go` live in `x_test.go`; the only other test files are `testhelpers_test.go`, `integration_test.go` and `example_test.go`. Declaration-only files need no test file.
@@ -124,4 +133,6 @@ Three tiers: unit (pure logic), mock broker (`ckafka.NewMockCluster`, no Docker,
 - Comments explain why and never cite task or ticket numbers.
 - State flags are `atomic.Bool`.
 - A commit either moves code or changes behaviour, never both. Bug fixes come with a test that failed before the fix.
+- Commit subjects follow Conventional Commits. `feat:`, `fix:` and `deps:` subjects become changelog lines, so write them for a user of the library; `docs:`, `test:`, `refactor:`, `ci:` and `build:` stay out of the changelog and do not cause a release.
+- A `!` after the commit type or a `BREAKING CHANGE:` footer makes release-please propose `v2.0.0`, which a Go module can only publish under a `/v2` module path. To stay on 1.x, add the footer `Release-As: x.y.z` to a commit.
 - Before committing, run `make build vet lint` and `make cover-check`.
