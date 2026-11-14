@@ -126,6 +126,11 @@ related). Delivery stays at-least-once.
 
 ### Fixed
 
+- The DLQ producer closed silently with messages still queued, and an unread
+  error event from an earlier broker outage made that close wait its whole
+  10-second flush timeout with nothing to deliver. `Consumer.Close` now logs a
+  warning with the number of DLQ messages left undelivered, and stale events no
+  longer delay it.
 - `Consumer.Close` destroyed the client under a consume loop that was still
   running after its 5-second wait (a handler that had not returned, with the
   `Start` context not cancelled), which could crash the process. `Close` now
