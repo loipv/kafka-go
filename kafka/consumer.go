@@ -26,8 +26,8 @@ import (
 //
 // Handlers (message, batch, grouped batch, error handler) run on the goroutine
 // running Start, with one exception: the final batch flush performed by Close
-// runs on the goroutine that called Close, after the consume loop has exited
-// (or after Close's 5s wait for it). Rebalance callbacks run on whichever
+// runs on the goroutine that called Close, after the consume loop has exited.
+// Rebalance callbacks run on whichever
 // goroutine is polling the client: normally Start's, and Close's while the
 // client shuts down. Pause, Resume, Metrics and Commit may be called from any
 // goroutine; the On* registrations are not synchronised and must happen before
@@ -326,11 +326,17 @@ func (c *Consumer) Start(ctx context.Context) error {
 // handler, the error handler and the DLQ for the remaining messages, so a
 // cancelled ctx cuts the flush short; a batch whose handler fails after ctx
 // ended is left unstored and redelivered, like any batch shutdown interrupts.
-// Cancel the Start context before calling Close when handlers or retries can
-// run long: without a cancel, Close falls back to the bounded 5s wait and may
-// then close the handle while a long retry is still in flight. A message whose
-// retry wait Close interrupts is not handed to the error handler or the DLQ: it
-// is left unstored and redelivered (see Start).
+// A message whose retry wait Close interrupts is not handed to the error
+// handler or the DLQ: it is left unstored and redelivered (see Start).
+//
+// Cancel the Start context before calling Close when handlers can run long.
+// If the consume loop is still busy after the 5 seconds (a handler has not
+// returned, or a DLQ delivery wait is in progress), Close does not destroy the
+// client under it: it returns ErrCloseTimeout, and the loop releases the DLQ
+// producer, the idempotency store and the client itself when Start returns.
+// The final batch flush is skipped in that case; those messages are unstored
+// and redelivered. A handler that never returns and ignores its context keeps
+// the client open until the process exits.
 //
 // Close is safe to call more than once; later calls return nil and do nothing.
 func (c *Consumer) Close(ctx context.Context) error {

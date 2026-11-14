@@ -270,7 +270,7 @@ consumer.OnGroupedBatch(func(ctx context.Context, groups []kafka.GroupedBatch) e
 1. Cancel the context passed to `Start` (the signal handler in the quick start does this) and wait for `Start` to return.
 2. Call `Close(ctx)`. It waits up to 5 seconds for the poll loop to leave, flushes the batch still in memory (batch modes), closes the DLQ producer and the idempotency store, and closes the client. `ctx` bounds only that final flush, so give it a deadline (create the context just before calling `Close`, as the quick start does) and do not pass an already-cancelled context.
 
-If `Close` is called while a long retry is still in flight and the `Start` context was not cancelled, `Close` falls back to its 5-second wait and may close the client under that retry. `Close` is safe to call more than once; later calls return `nil`.
+If the poll loop is still busy after those 5 seconds (a handler has not returned, or a DLQ delivery wait is in progress, and the `Start` context was not cancelled), `Close` returns `ErrCloseTimeout` and leaves the client alone: the loop releases the DLQ producer, the idempotency store and the client when `Start` returns, without the final batch flush (those messages are unstored and redelivered). A handler that never returns and ignores its context keeps the client open until the process exits. `Close` is safe to call more than once; later calls return `nil`.
 
 Shutdown is not a handler failure. A message or batch whose handler returns an error after the `Start` context was cancelled, or whose retry wait that cancellation or `Close` cuts short, is neither parked nor blocked: its offset is not stored, the error handler and the DLQ are not invoked, and it is redelivered, to this consumer if `Start` is called again and otherwise to whichever member next consumes the partition. A handler that returns `nil` after the cancellation has processed its message, which is parked as usual. The same holds for the final batch flush in `Close` when its `ctx` ends and the batch handler then fails. Let handlers honour their `ctx` so shutdown is prompt.
 
@@ -724,6 +724,7 @@ Sentinel errors are package variables; test for them with `errors.Is`.
 | `ErrInvalidBatchTimeout` | By `NewConsumer` when the batch timeout is not positive. |
 | `ErrNoHandler` | By `Consumer.Start` when no handler was registered. |
 | `ErrConsumerRunning` | By `Consumer.Start` when the consumer is already running. |
+| `ErrCloseTimeout` | By `Consumer.Close` when the poll loop was still running after its 5-second wait; the consumer's resources are released when `Start` returns. |
 | `ErrConsumerClosed` | By `Consumer.Start` after `Close`, and by `Consumer.Commit` once the consumer has been closed. |
 | `ErrProducerClosed` | By `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` after the producer was closed. |
 | `ErrSkippedOnMaxRetries` | Wraps the last handler error passed to the error handler and the DLQ when `SkipOnMaxRetries` drops a message. `Start` does not return it. |

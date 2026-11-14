@@ -126,6 +126,12 @@ related). Delivery stays at-least-once.
 
 ### Fixed
 
+- `Consumer.Close` destroyed the client under a consume loop that was still
+  running after its 5-second wait (a handler that had not returned, with the
+  `Start` context not cancelled), which could crash the process. `Close` now
+  returns `ErrCloseTimeout` in that case and the loop releases the DLQ
+  producer, the idempotency store and the client when `Start` returns; the
+  final batch flush is skipped and those messages are redelivered.
 - `Producer.Close` could stall for the full flush timeout and lose async delivery
   failures, because it stopped the delivery-report reader before flushing. It
   now flushes first and logs a warning with the number of messages it gave up on
@@ -197,6 +203,7 @@ related). Delivery stays at-least-once.
 - `TracingConfig.IncludeMessageKey`, `Metrics`, `TopicMetrics`, `RebalanceType`,
   `RebalanceAssigned`, `RebalanceRevoked`, `ErrDLQTopicRequired`,
   `ErrInvalidBatchSize` and `ErrInvalidBatchTimeout` (described above).
+- `ErrCloseTimeout`, returned by `Consumer.Close` (see Fixed).
 - Doc comments on every exported identifier, compiled `Example` functions for
   the producer, async producer, consumer, batch and grouped-batch consumers,
   `Commit` and the health checker, and a README rewritten to match.
