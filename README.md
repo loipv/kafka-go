@@ -305,7 +305,7 @@ consumer.OnMessage(func(ctx context.Context, msg *kafka.Message) error {
 
 ### Rebalance callback
 
-`ConsumerWithRebalanceCallback` is called with a `RebalanceEvent` whose `Type` is `RebalanceAssigned` or `RebalanceRevoked` and whose `Partitions` are the affected topic-partitions. It runs on whichever goroutine is polling the client (normally the one running `Start`, and the one running `Close` while the client shuts down), before the library applies the assignment, so keep it short. A non-nil error is logged and makes the library skip its own handling of that event. `TopicPartition.Offset` in an event is whatever librdkafka reports, often a logical value such as "unset", not a message position.
+`ConsumerWithRebalanceCallback` is called with a `RebalanceEvent` whose `Type` is `RebalanceAssigned` or `RebalanceRevoked` and whose `Partitions` are the affected topic-partitions. It runs on whichever goroutine is polling the client (normally the one running `Start`, and the one running `Close` while the client shuts down), before the library applies the assignment, so keep it short. A non-nil error is logged; the client applies the assignment or the revoke all the same, and with auto commit off the library skips its commit of stored offsets before that revoke. `TopicPartition.Offset` in an event is whatever librdkafka reports, often a logical value such as "unset", not a message position.
 
 ```go
 consumer, err := kafka.NewConsumer(

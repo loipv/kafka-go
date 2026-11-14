@@ -160,28 +160,10 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 		}
 		return errors.Join(append(errs, cause)...)
 	}
-	// await consumes one delivery report. It returns a non-nil cause when the
-	// wait is over for good: ctx is done, or Close finished and no report
-	// still buffered in the channel covers what is pending.
 	await := func() error {
-		select {
-		case e := <-deliveryChan:
-			pending--
-			if err := finishDelivery(e); err != nil {
-				errs = append(errs, err)
-			}
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-p.done:
-			var drained []error
-			drained, pending = drainReports(deliveryChan, pending)
-			errs = append(errs, drained...)
-			if pending > 0 {
-				return ErrProducerClosed
-			}
-			return nil
-		}
+		got, left, cause := p.awaitReport(ctx, deliveryChan, pending)
+		errs, pending = append(errs, got...), left
+		return cause
 	}
 enqueue:
 	for i, m := range msgs {
@@ -230,6 +212,28 @@ enqueue:
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// awaitReport consumes one delivery report from ch, of the pending ones. It
+// returns the delivery errors it saw, how many messages still have no report,
+// and a non-nil cause when the wait is over for good: ctx is done, or Close
+// finished and no report still buffered in ch covers what is pending.
+func (p *Producer) awaitReport(ctx context.Context, ch <-chan ckafka.Event, pending int) (errs []error, left int, cause error) {
+	select {
+	case e := <-ch:
+		if err := finishDelivery(e); err != nil {
+			errs = append(errs, err)
+		}
+		return errs, pending - 1, nil
+	case <-ctx.Done():
+		return nil, pending, ctx.Err()
+	case <-p.done:
+		errs, left = drainReports(ch, pending)
+		if left > 0 {
+			return errs, left, ErrProducerClosed
+		}
+		return errs, 0, nil
+	}
 }
 
 // acquire takes the client lock for reading and reports whether the producer
