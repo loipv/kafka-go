@@ -66,6 +66,9 @@ related). Delivery stays at-least-once.
 
 ### Changed
 
+- **Minimum Go is 1.26.11** (was 1.24.10). It is the lowest release in which
+  every standard-library vulnerability `govulncheck` reported for this module
+  is fixed; `make vuln` now scans on exactly the Go version `go.mod` declares.
 - The DLQ header `x-dlq-handler-retry-count` is now `x-dlq-handler-attempts`.
   Its value was always the number of handler calls (the first one included, 1
   for a batch handler), not the number of retries; only the name changed.
@@ -320,8 +323,7 @@ ports all of them in one pass.
   return value lets the handler claim ownership of the message.
 - `HealthResult.Error` is `string` (`json:"error,omitzero"`).
 - `Default*` values are `const`.
-- Minimum Go 1.26.11 (was 1.24.10): it is the lowest release in which every
-  standard-library vulnerability `govulncheck` reported for this module is fixed.
+- Minimum Go 1.24.10.
 
 ### Changed behavior (same signature)
 
