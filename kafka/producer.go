@@ -310,7 +310,9 @@ func topicOf(m *ckafka.Message) string {
 // the queue-full error immediately and the caller decides whether to retry.
 // Unlike Produce it does not start a trace span or inject trace context.
 // Calling it after Close, or losing a race with Close, returns
-// ErrProducerClosed.
+// ErrProducerClosed. The one case where it does not return at once is a Close
+// that is waiting for a running Flush: produce calls made meanwhile wait for
+// that Flush to end.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 	if !p.acquire() {
 		return ErrProducerClosed

@@ -66,6 +66,10 @@ related). Delivery stays at-least-once.
 
 ### Changed
 
+- `Consumer.Close` can now return an error other than the client's own:
+  `ErrCloseTimeout`, when the consume loop is still running after the 5-second
+  wait. Treat it as "released later, when `Start` returns", not as a failure to
+  retry; a later `Close` returns `nil`.
 - **Minimum Go is 1.26.11** (was 1.24.10). It is the lowest release in which
   every standard-library vulnerability `govulncheck` reported for this module
   is fixed; `make vuln` now scans on exactly the Go version `go.mod` declares.
@@ -147,8 +151,8 @@ related). Delivery stays at-least-once.
   warning with the number of DLQ messages left undelivered, and stale events no
   longer delay it.
 - `Consumer.Close` destroyed the client under a consume loop that was still
-  running after its 5-second wait (a handler that had not returned, with the
-  `Start` context not cancelled), which could crash the process. `Close` now
+  running after its 5-second wait (a handler or a DLQ delivery wait that had
+  not returned), which could crash the process. `Close` now
   returns `ErrCloseTimeout` in that case and the loop releases the DLQ
   producer, the idempotency store and the client when `Start` returns; the
   final batch flush is skipped and those messages are redelivered.

@@ -24,9 +24,10 @@ var (
 	// already running.
 	ErrConsumerRunning = errors.New("consumer is already running")
 	// ErrCloseTimeout is returned by Consumer.Close when the consume loop was
-	// still running after Close's wait (a handler has not returned and the
-	// Start context was not cancelled). The consumer is closed to new work; its
-	// client and DLQ producer are released when Start returns.
+	// still running after Close's wait: a handler or a DLQ delivery wait had
+	// not returned, whether or not the Start context was cancelled. The
+	// consumer is closed to new work; its client and DLQ producer are released
+	// when Start returns.
 	ErrCloseTimeout = errors.New("consumer close timed out waiting for the consume loop; resources are released when Start returns")
 	// ErrSkippedOnMaxRetries wraps the last handler error that is passed to the
 	// error handler and the DLQ when RetryConfig.SkipOnMaxRetries drops a message
