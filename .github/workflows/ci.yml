@@ -52,8 +52,9 @@ jobs:
     # Runs last and only for pushes to main, once the pushed commit passed the
     # jobs below. It tags a merged release PR at that PR's own commit, so this
     # delays the tag of a red release commit but does not prevent it.
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.repository == 'loipv/kafka-go' # not on forks
     needs: [test, lint, integration, vuln]
+    concurrency: {group: release-please} # two quick pushes must not update the release PR at once
     runs-on: ubuntu-latest
     permissions: {contents: write, issues: write, pull-requests: write}
     steps:
