@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,7 +159,10 @@ func (p *Producer) produceAndAwait(ctx context.Context, msgs []*ckafka.Message) 
 		for _, m := range msgs {
 			endSpan(m, cause) // no-op for a message whose report already ended its span
 		}
-		return errors.Join(append(errs, cause)...)
+		if !slices.Contains(errs, cause) { // Close may already be there, for the messages it kept out of the queue
+			errs = append(errs, cause)
+		}
+		return errors.Join(errs...)
 	}
 	await := func() error {
 		got, left, cause := p.awaitReport(ctx, deliveryChan, pending)

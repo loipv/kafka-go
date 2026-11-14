@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -389,6 +390,37 @@ func TestProducer_AwaitReportCountsBufferedReportAfterClose(t *testing.T) {
 		if cause != nil || left != 0 || len(errs) != 0 {
 			t.Fatalf("awaitReport() = %v errors, %d left, cause %v; want a confirmed delivery", errs, left, cause)
 		}
+	}
+}
+
+// When Close cuts a batch short while it is being queued and the messages
+// already queued go unconfirmed, the result names ErrProducerClosed once.
+func TestProducer_BatchCutShortByCloseReportsClosedOnce(t *testing.T) {
+	skipIfShort(t)
+	p, topic := downProducer(t)
+	msgs := make([]*Message, 50000)
+	for i := range msgs {
+		msgs[i] = &Message{Value: []byte("v")}
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.ProduceBatch(context.Background(), topic, msgs) }()
+	for deadline := time.Now().Add(5 * time.Second); p.producer.Len() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("no message was queued")
+		}
+		runtime.Gosched() // Close has to land while the batch is still being queued
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
+	}
+	select {
+	case err := <-done:
+		if n := strings.Count(err.Error(), ErrProducerClosed.Error()); n != 1 {
+			t.Errorf("ProduceBatch() error names ErrProducerClosed %d times, want once: %v", n, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ProduceBatch did not return within 10s of Close")
 	}
 }
 
