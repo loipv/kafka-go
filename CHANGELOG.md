@@ -129,6 +129,10 @@ related). Delivery stays at-least-once.
 
 ### Fixed
 
+- A `RetryConfig` with an absurd `MaxRetries` or interval overflowed the retry
+  budget behind `max.poll.interval.ms`: the wrapped-around value could pass the
+  24-hour check, and a huge `MaxRetries` made `NewConsumer` spin. The budget now
+  saturates and such a configuration is rejected with the 24-hour limit error.
 - In batch modes, messages of a revoked partition stayed in the pending batch:
   the next flush handed them to the handler although the partition belonged to
   another member (duplicate processing), and a failure then listed that
