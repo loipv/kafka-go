@@ -13,5 +13,8 @@ cover:            ; $(GO) test -race -coverprofile=coverage.out -covermode=atomi
 COVER_MIN ?= 80
 cover-check:      ; $(GO) test -race -coverprofile=coverage.out -covermode=atomic ./kafka/... && $(GO) tool cover -func=coverage.out | awk -v min=$(COVER_MIN) '/^total:/ {sub("%","",$$3); if ($$3+0 < min) {printf "coverage %.1f%% is below %d%%\n", $$3, min; exit 1} printf "coverage %.1f%%\n", $$3}'
 tidy:             ; $(GO) mod tidy
-# govulncheck v1.1.4 is the newest that runs on the repository's Go 1.24 (v1.2.0+ need Go 1.25).
-vuln:             ; $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+# The scan runs on exactly the Go version go.mod declares, never a newer toolchain: a
+# newer one would scan its own standard library and report a clean result for a version
+# users are not on. If govulncheck ever needs a newer Go, this fails instead.
+GO_MIN := $(shell sed -n 's/^go //p' go.mod)
+vuln:             ; GOTOOLCHAIN=go$(GO_MIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
