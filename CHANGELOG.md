@@ -66,6 +66,12 @@ related). Delivery stays at-least-once.
 
 ### Changed
 
+- `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` may now be called
+  concurrently with `Producer.Close` (it was forbidden: a call could reach the
+  client while `Close` destroyed it). A call that loses the race returns
+  `ErrProducerClosed`, and a `Produce` or `ProduceBatch` still waiting for a
+  delivery report when `Close` ends returns an error wrapping
+  `ErrProducerClosed` instead of waiting for its context.
 - **The consumer mode follows the registered handler.** `OnMessage`, `OnBatch`
   and `OnGroupedBatch` select single-message, batch and key-grouped delivery; one
   handler is active and a later registration replaces the earlier one.

@@ -15,10 +15,9 @@ import (
 // Producer is a Kafka producer built on a librdkafka producer handle. Create
 // one with NewProducer and release it with Close.
 //
-// Produce, ProduceBatch, ProduceAsync and Flush are safe for concurrent use by
-// multiple goroutines. Close must not run concurrently with them: stop the
-// producing goroutines first, otherwise a produce call can race the teardown
-// of the underlying handle.
+// Produce, ProduceBatch, ProduceAsync, Flush and Close are safe for concurrent
+// use by multiple goroutines, Close included: a call that loses the race with
+// Close returns ErrProducerClosed.
 type Producer struct {
 	producer *ckafka.Producer
 	config   *ProducerConfig
@@ -101,8 +100,9 @@ func NewProducer(opts ...ProducerOption) (*Producer, error) {
 // queue.buffering.max.kbytes) fails with a queue-full error instead of waiting
 // forever. If ctx is done before the report arrives, Produce returns the
 // context's error; the message may still be delivered afterwards. Calling it
-// after Close returns ErrProducerClosed. It must not be called concurrently
-// with Close.
+// after Close returns ErrProducerClosed. A Produce that is still waiting for
+// its report when Close ends returns an error wrapping ErrProducerClosed: the
+// message was not confirmed and may not have been delivered.
 func (p *Producer) Produce(ctx context.Context, topic string, msg *Message) error {
 	return p.produceAndAwait(ctx, []*ckafka.Message{p.prepareMessage(ctx, topic, msg)})
 }
@@ -116,8 +116,9 @@ func (p *Producer) Produce(ctx context.Context, topic string, msg *Message) erro
 // of each message of the batch as unknown (some may have been delivered). When
 // ctx ends first, the messages that have no delivery report yet may still be
 // delivered later.
-// Back-pressure, ctx handling and the ErrProducerClosed rule are the same as
-// for Produce, and it must not be called concurrently with Close.
+// Back-pressure, ctx handling and the ErrProducerClosed rules are the same as
+// for Produce: when Close cuts a batch short, the result wraps
+// ErrProducerClosed for the messages that were not queued or not confirmed.
 func (p *Producer) ProduceBatch(ctx context.Context, topic string, msgs []*Message) error {
 	if len(msgs) == 0 {
 		return nil
@@ -308,8 +309,8 @@ func topicOf(m *ckafka.Message) string {
 // There is no back-pressure: when the local queue is full, ProduceAsync returns
 // the queue-full error immediately and the caller decides whether to retry.
 // Unlike Produce it does not start a trace span or inject trace context.
-// Calling it after Close returns ErrProducerClosed, and it must not be called
-// concurrently with Close.
+// Calling it after Close, or losing a race with Close, returns
+// ErrProducerClosed.
 func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 	if !p.acquire() {
 		return ErrProducerClosed
@@ -321,8 +322,8 @@ func (p *Producer) ProduceAsync(topic string, msg *Message) error {
 // Flush waits up to timeout for every queued message (including ProduceAsync
 // ones) to be delivered. It returns an error stating how many messages are
 // still queued when the timeout expires, and nil when the queue drained.
-// Calling it after Close returns ErrProducerClosed (Close already flushed), and
-// it must not be called concurrently with Close.
+// Calling it after Close returns ErrProducerClosed (Close already flushed). A
+// Close called while Flush is running waits for it to return.
 func (p *Producer) Flush(timeout time.Duration) error {
 	if !p.acquire() {
 		return ErrProducerClosed // the librdkafka handle is gone; touching it faults
@@ -344,8 +345,10 @@ var closeFlushTimeout = 10 * time.Second
 // warning with the number left behind and closes anyway, so those messages are
 // lost. It waits for the delivery-report goroutine to exit before releasing the
 // librdkafka handle, and always returns nil. Close is safe to call more than
-// once (later calls do nothing), but it must not be called concurrently with
-// Produce, ProduceBatch or ProduceAsync.
+// once (later calls do nothing) and concurrently with the other methods: calls
+// that start after it return ErrProducerClosed, and a Produce or ProduceBatch
+// still waiting for a delivery report when the flush ends returns an error
+// wrapping ErrProducerClosed.
 func (p *Producer) Close() error {
 	// Flip the flag under the write lock: when the lock is released, every
 	// call that got in before has finished with the client and no later call

@@ -209,7 +209,7 @@ if err := producer.Flush(10 * time.Second); err != nil {
 Things to know:
 
 - **Back-pressure.** When librdkafka's local queue is full, `Produce` and `ProduceBatch` wait for in-flight delivery reports to drain it and retry. A message that can never fit (for example one larger than `queue.buffering.max.kbytes`) fails at once with a queue-full error. `ProduceAsync` has no back-pressure: it returns the queue-full error immediately and the caller decides what to do.
-- **Close.** Do not call a produce method concurrently with `Close`; stop the producing goroutines first. `Produce`, `ProduceBatch`, `ProduceAsync` and `Flush` are otherwise safe for concurrent use. After `Close`, the produce methods and `Flush` return `ErrProducerClosed`.
+- **Close.** `Produce`, `ProduceBatch`, `ProduceAsync`, `Flush` and `Close` are safe for concurrent use, `Close` included. After `Close`, or when a call loses a race with it, the produce methods and `Flush` return `ErrProducerClosed`. A `Produce` or `ProduceBatch` still waiting for a delivery report when `Close` finishes its flush returns an error wrapping `ErrProducerClosed`; that message was not confirmed and may not have been delivered.
 - **The delivery error handler** runs on the producer's single delivery-report goroutine. A slow handler delays later reports, and it must not call `Close`.
 - **Retries** belong to librdkafka. Tune them, and the delivery timeout, through `ProducerWithRawConfig`:
 
@@ -804,7 +804,6 @@ Make targets (they mirror CI):
 - A batch handler is not retried in place; a failed batch is redelivered whole (or sent to the DLQ).
 - Retry waits and the DLQ delivery wait run on the poll loop, so a message being retried or awaiting DLQ confirmation stops consumption of every partition of that consumer.
 - `ProduceAsync` has no back-pressure and no trace span.
-- Produce methods must not run concurrently with `Close`.
 - `CheckConsumerLag` needs the brokers' consumer group admin APIs (describe group, list group offsets) and permission to use them.
 
 ## License
