@@ -1336,3 +1336,44 @@ func TestConsumer_RevokeDropsPendingBatchMessages(t *testing.T) {
 		t.Errorf("pending batch after the revoke = %+v, want only the partition 1 message", c.batch)
 	}
 }
+
+// A Close that races the very beginning of Start must still end with the
+// consumer released by exactly one of them. The test parks both on c.mu and
+// lets them go together: whichever order they take the lock in, once both have
+// returned the client must be closed.
+func TestConsumer_CloseRacingStartStillReleasesTheClient(t *testing.T) {
+	skipIfShort(t)
+	old := closeLoopWait
+	closeLoopWait = 300 * time.Millisecond
+	t.Cleanup(func() { closeLoopWait = old })
+
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 1)
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	c.OnMessage(func(context.Context, *Message) error { return nil })
+
+	c.mu.Lock()
+	startErr, closeErr := make(chan error, 1), make(chan error, 1)
+	go func() { startErr <- c.Start(context.Background()) }()
+	time.Sleep(100 * time.Millisecond) // Start is parked on c.mu
+	go func() { closeErr <- c.Close(context.Background()) }()
+	time.Sleep(100 * time.Millisecond) // so is Close
+	c.mu.Unlock()
+
+	for name, ch := range map[string]chan error{"Start": startErr, "Close": closeErr} {
+		select {
+		case err := <-ch:
+			if err != nil && !errors.Is(err, ErrConsumerClosed) && !errors.Is(err, ErrCloseTimeout) {
+				t.Errorf("%s() = %v", name, err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s did not return", name)
+		}
+	}
+	waitFor(t, 5*time.Second, c.handleClosed.Load, "neither Start nor Close released the client")
+}

@@ -246,18 +246,21 @@ func (c *Consumer) Start(ctx context.Context) error {
 	if c.messageHandler == nil && c.batchHandler == nil && c.groupedBatchHandler == nil {
 		return ErrNoHandler
 	}
+	// Claim the run and publish its exit signal in one step under mu, the lock
+	// Close samples them under: a Close that sees running must also see this
+	// run's channel (never nil, never an earlier run's), or it would wait on
+	// the wrong thing and leave the consumer to a loop that already left. Only
+	// a Start that wins the CAS replaces the channel: a failed one must not
+	// swap out the channel the running loop closes.
+	c.mu.Lock()
 	if c.closed.Load() {
+		c.mu.Unlock()
 		return ErrConsumerClosed
 	}
-	// Use atomic CAS to ensure only one Start can succeed
 	if !c.running.CompareAndSwap(false, true) {
+		c.mu.Unlock()
 		return ErrConsumerRunning
 	}
-	// Publish this run's exit signal only after winning the CAS: a failed
-	// Start must never replace the channel the already-running loop closes,
-	// or Close would wait on an orphan (guaranteed 5s stall, then a close
-	// racing an in-flight poll).
-	c.mu.Lock()
 	c.loopExited = make(chan struct{})
 	c.mu.Unlock()
 	defer c.running.Store(false) // every exit path releases
@@ -341,12 +344,18 @@ func (c *Consumer) Start(ctx context.Context) error {
 //
 // Close is safe to call more than once; later calls return nil and do nothing.
 func (c *Consumer) Close(ctx context.Context) error {
-	wasRunning := c.running.Load()
-	// Use atomic CAS to ensure only one Close can succeed
+	// Flip closed and sample the run state under mu, the lock Start claims a
+	// run under: either Start already published this run's exit signal, or it
+	// has not claimed the run and will now see closed. Only one Close gets
+	// past the CAS.
+	c.mu.Lock()
 	if !c.closed.CompareAndSwap(false, true) {
+		c.mu.Unlock()
 		return nil
 	}
+	wasRunning, loopExited := c.running.Load(), c.loopExited
 	c.running.Store(false)
+	c.mu.Unlock()
 
 	// Stop helper goroutines (batch flush ticker)
 	close(c.done)
@@ -354,9 +363,6 @@ func (c *Consumer) Close(ctx context.Context) error {
 	// Wait for the main loop to leave ReadMessage before destroying the
 	// handle: consumer.Close() during an in-flight cgo poll segfaults.
 	if wasRunning {
-		c.mu.RLock()
-		loopExited := c.loopExited
-		c.mu.RUnlock()
 		select {
 		case <-loopExited:
 		case <-time.After(closeLoopWait):
