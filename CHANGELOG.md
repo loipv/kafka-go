@@ -126,6 +126,11 @@ related). Delivery stays at-least-once.
 
 ### Fixed
 
+- In batch modes, messages of a revoked partition stayed in the pending batch:
+  the next flush handed them to the handler although the partition belonged to
+  another member (duplicate processing), and a failure then listed that
+  partition in `BlockedPartitions` for good. They are now dropped at the revoke
+  and redelivered to the partition's next owner.
 - The DLQ producer closed silently with messages still queued, and an unread
   error event from an earlier broker outage made that close wait its whole
   10-second flush timeout with nothing to deliver. `Consumer.Close` now logs a

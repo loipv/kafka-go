@@ -329,6 +329,8 @@ if err != nil {
 _ = consumer
 ```
 
+In batch modes, when partitions are revoked the messages from those partitions that are still waiting in the partial batch are dropped unprocessed. Their offsets were never stored, so the partition's next owner receives them; handling them here would only duplicate that work.
+
 `ConsumerWithPartitionAssignor` selects the assignment strategy: `AssignorRange` (default), `AssignorRoundRobin` or `AssignorCooperativeSticky`. All members of a group should use the same one.
 
 ## Delivery guarantees
