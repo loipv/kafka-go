@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -605,6 +606,29 @@ func (c *Consumer) addToBatch(ctx context.Context, msg *Message) {
 	}
 }
 
+// dropPendingFor removes from the pending batch every message of the given
+// partitions and returns how many it removed; entries without a topic are
+// ignored and the order of the remaining messages is kept. It runs when
+// partitions are revoked: their messages are unstored, so the partition's next
+// owner gets them again, while handling them here would duplicate that work
+// and could block a partition this consumer no longer owns.
+func (c *Consumer) dropPendingFor(ps []ckafka.TopicPartition) int {
+	revoked := make(map[TopicPartition]struct{}, len(ps))
+	for _, tp := range ps {
+		if tp.Topic != nil {
+			revoked[TopicPartition{Topic: *tp.Topic, Partition: tp.Partition}] = struct{}{}
+		}
+	}
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	before := len(c.batch)
+	c.batch = slices.DeleteFunc(c.batch, func(m *Message) bool {
+		_, gone := revoked[TopicPartition{Topic: m.Topic, Partition: m.Partition}]
+		return gone
+	})
+	return before - len(c.batch)
+}
+
 // processBatch processes the current batch and reports whether the batch
 // parked, blocked or was interrupted by shutdown. Whole-batch semantics: if ANY
 // message is unparkable, nothing is stored and the whole batch blocks
@@ -839,6 +863,11 @@ func (c *Consumer) rebalanceCallback() ckafka.RebalanceCb {
 				}
 			}
 
+			// The revoked partitions belong to another member from here on:
+			// their pending messages are unstored and will reach that member.
+			if n := c.dropPendingFor(e.Partitions); n > 0 {
+				c.logger.Debug("dropped pending batch messages of revoked partitions", "count", n)
+			}
 			c.dropBlockedFor(e.Partitions)
 
 			if cooperative {

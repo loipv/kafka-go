@@ -1286,3 +1286,53 @@ func TestConsumer_CloseTimeoutHandsTeardownToLoop(t *testing.T) {
 		return committedOffset(t, mc.BootstrapServers(), group, topic, 0) == 1
 	}, "the message's offset was never committed")
 }
+
+func TestConsumer_DropPendingForRemovesRevokedPartitions(t *testing.T) {
+	t0, other := "t", "u"
+	c := &Consumer{batch: []*Message{
+		{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 7},
+		{Topic: "u", Partition: 0, Offset: 1}, {Topic: "t", Partition: 0, Offset: 6},
+	}}
+	n := c.dropPendingFor([]ckafka.TopicPartition{
+		{Topic: &t0, Partition: 0}, {Partition: 1}, {Topic: &other, Partition: 9},
+	})
+	if n != 2 {
+		t.Errorf("dropPendingFor() = %d, want 2", n)
+	}
+	if len(c.batch) != 2 || c.batch[0].Partition != 1 || c.batch[1].Topic != "u" {
+		t.Errorf("pending batch = %+v, want t/1 then u/0", c.batch)
+	}
+	if n := c.dropPendingFor([]ckafka.TopicPartition{{Topic: &other, Partition: 9}, {Partition: 0}}); n != 0 || len(c.batch) != 2 {
+		t.Errorf("a revoke naming no pending partition changed the batch: removed %d, len %d", n, len(c.batch))
+	}
+}
+
+// A revoked partition's messages must leave the pending batch: the partition
+// belongs to another member now, which gets them redelivered.
+func TestConsumer_RevokeDropsPendingBatchMessages(t *testing.T) {
+	skipIfShort(t)
+	mc := newMockCluster(t)
+	topic := uniqueTopic(t, mc, 2)
+	c, err := NewConsumer(ConsumerWithBrokers(mc.BootstrapServers()),
+		ConsumerWithGroupID(uniqueGroupName(t)), ConsumerWithTopics(topic),
+		ConsumerWithLogger(slog.New(slog.DiscardHandler)))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer c.Close(context.Background())
+	c.OnBatch(func(context.Context, []*Message) error { return nil })
+	c.batch = []*Message{
+		{Topic: topic, Partition: 0, Offset: 0}, {Topic: topic, Partition: 1, Offset: 0},
+		{Topic: topic, Partition: 0, Offset: 1},
+	}
+
+	_ = c.rebalanceCallback()(c.consumer, ckafka.RevokedPartitions{
+		Partitions: []ckafka.TopicPartition{{Topic: &topic, Partition: 0}},
+	})
+
+	c.batchMu.Lock()
+	defer c.batchMu.Unlock()
+	if len(c.batch) != 1 || c.batch[0].Partition != 1 {
+		t.Errorf("pending batch after the revoke = %+v, want only the partition 1 message", c.batch)
+	}
+}
