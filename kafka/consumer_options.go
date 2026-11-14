@@ -73,8 +73,8 @@ type ConsumerConfig struct {
 // DLQConfig holds Dead Letter Queue configuration. Pass it to ConsumerWithDLQ.
 // A message that cannot be processed is produced to Topic with its original
 // key, value and headers plus x-dlq-original-topic, x-dlq-timestamp
-// (RFC 3339), x-dlq-handler-retry-count and, with IncludeErrorInfo,
-// x-dlq-error-message.
+// (RFC 3339), x-dlq-handler-attempts (the number of handler calls) and, with
+// IncludeErrorInfo, x-dlq-error-message.
 //
 // The DLQ produce is a single attempt, confirmed by its delivery report and
 // bounded by the DLQ producer's message.timeout.ms: 30s unless the DLQ

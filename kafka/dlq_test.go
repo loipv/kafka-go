@@ -94,8 +94,8 @@ func TestDLQ_RoundTrip(t *testing.T) {
 		t.Errorf("x-dlq-error-message = %q, want it to contain %q", msg, handlerErr.Error())
 	}
 	attempts := 2 // fastAtLeastOnce pins Retry.MaxRetries=1 → 2 handler invocations
-	if got := string(hdrs["x-dlq-handler-retry-count"]); got != strconv.Itoa(attempts) {
-		t.Errorf("x-dlq-handler-retry-count = %q, want %q", got, strconv.Itoa(attempts))
+	if got := string(hdrs["x-dlq-handler-attempts"]); got != strconv.Itoa(attempts) {
+		t.Errorf("x-dlq-handler-attempts = %q, want %q", got, strconv.Itoa(attempts))
 	}
 	if string(dlqMsg.Value) != "poison" {
 		t.Errorf("dlq value = %q, want the original payload", dlqMsg.Value)
@@ -445,8 +445,11 @@ func TestDLQ_BuildMessageCapsErrorHeader(t *testing.T) {
 	if got := len(hdrs["x-dlq-error-message"]); got != maxDLQErrorBytes {
 		t.Errorf("x-dlq-error-message = %d bytes, want %d", got, maxDLQErrorBytes)
 	}
-	if got := string(hdrs["x-dlq-handler-retry-count"]); got != "3" {
-		t.Errorf("x-dlq-handler-retry-count = %q, want 3", got)
+	if got := string(hdrs["x-dlq-handler-attempts"]); got != "3" {
+		t.Errorf("x-dlq-handler-attempts = %q, want 3", got)
+	}
+	if _, old := hdrs["x-dlq-handler-retry-count"]; old {
+		t.Error("the old x-dlq-handler-retry-count header is still set")
 	}
 	if got := string(hdrs["h"]); got != "1" {
 		t.Errorf("original header h = %q, want it carried over", got)

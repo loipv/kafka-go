@@ -96,7 +96,7 @@ func (s *dlqService) buildDLQMessage(msg *Message, cause error, attempts int) *c
 
 	out.SetHeader("x-dlq-original-topic", []byte(msg.Topic))
 	out.SetHeader("x-dlq-timestamp", appendTime(nil, time.Now()))
-	out.SetHeader("x-dlq-handler-retry-count", []byte(strconv.Itoa(attempts))) // the real count
+	out.SetHeader("x-dlq-handler-attempts", []byte(strconv.Itoa(attempts))) // handler calls, the first included
 	if s.config.IncludeErrorInfo && cause != nil {
 		out.SetHeader("x-dlq-error-message", []byte(truncateUTF8(cause.Error(), maxDLQErrorBytes)))
 	}

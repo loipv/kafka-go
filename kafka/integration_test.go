@@ -265,8 +265,8 @@ func TestIntegrationSASL_ProduceConsumeDLQHealth(t *testing.T) {
 	if msg := string(hdrs["x-dlq-error-message"]); !strings.Contains(msg, handlerErr.Error()) {
 		t.Errorf("x-dlq-error-message = %q, want it to contain %q", msg, handlerErr.Error())
 	}
-	if got := string(hdrs["x-dlq-handler-retry-count"]); got != "2" { // fastIntegration pins MaxRetries=1
-		t.Errorf("x-dlq-handler-retry-count = %q, want %q", got, "2")
+	if got := string(hdrs["x-dlq-handler-attempts"]); got != "2" { // fastIntegration pins MaxRetries=1
+		t.Errorf("x-dlq-handler-attempts = %q, want %q", got, "2")
 	}
 	if string(dlqMsg.Value) != "poison" {
 		t.Errorf("dlq value = %q, want the original payload", dlqMsg.Value)
