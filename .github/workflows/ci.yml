@@ -35,7 +35,7 @@ jobs:
       - run: go test -tags=integration -timeout=15m ./kafka/...
   darwin:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-14
+    runs-on: macos-latest # a pinned image is cancelled without a log once GitHub retires it
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
